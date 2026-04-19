@@ -1,10 +1,10 @@
-name: Build Safari (macOS)
+name: Build Release
 
 on:
   workflow_dispatch:
     inputs:
       tag:
-        description: Release tag (e.g. v1.6.2). Leave blank to skip release and only upload artifact.
+        description: Release tag (e.g. v1.6.2). Leave blank to build without creating a Release.
         required: false
         default: ''
   push:
@@ -15,6 +15,59 @@ permissions:
   contents: write
 
 jobs:
+  build-extensions:
+    name: Build Chrome and Firefox extensions
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          run_install: |
+            - args: [--frozen-lockfile]
+
+      - name: Build Chrome extension
+        run: pnpm build
+
+      - name: Pack Chrome zip
+        run: pnpm pack:zip
+
+      - name: Rename Chrome zip
+        run: mv extension.zip BewlyCat-chrome.zip
+
+      - name: Build Firefox extension
+        run: pnpm build-firefox
+
+      - name: Pack Firefox zip
+        run: pnpm pack:zip-firefox
+
+      - name: Rename Firefox zip
+        run: mv extension-firefox.zip BewlyCat-firefox.zip
+
+      - name: Upload Chrome artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: BewlyCat-chrome
+          path: BewlyCat-chrome.zip
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload Firefox artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: BewlyCat-firefox
+          path: BewlyCat-firefox.zip
+          if-no-files-found: error
+          retention-days: 30
+
   build-safari:
     name: Build Safari macOS app
     runs-on: macos-latest
@@ -84,7 +137,7 @@ jobs:
           ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" BewlyCat-safari-macos.zip
           ls -lh BewlyCat-safari-macos.zip
 
-      - name: Upload Safari macOS app artifact
+      - name: Upload Safari artifact
         uses: actions/upload-artifact@v4
         with:
           name: BewlyCat-safari-macos
@@ -92,13 +145,31 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+  release:
+    name: Publish Release
+    needs: [build-extensions, build-safari]
+    if: startsWith(github.ref, 'refs/tags/') || github.event.inputs.tag != ''
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: List assets
+        run: ls -lh dist/
+
       - name: Create or update Release
-        if: startsWith(github.ref, 'refs/tags/') || github.event.inputs.tag != ''
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.event.inputs.tag || github.ref_name }}
           name: ${{ github.event.inputs.tag || github.ref_name }}
-          files: BewlyCat-safari-macos.zip
+          files: |
+            dist/BewlyCat-chrome.zip
+            dist/BewlyCat-firefox.zip
+            dist/BewlyCat-safari-macos.zip
           generate_release_notes: true
           make_latest: true
           fail_on_unmatched_files: true

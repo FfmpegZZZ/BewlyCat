@@ -60,7 +60,7 @@ jobs:
         with:
           ref: main
 
-      - name: Dispatch safari.yml
+      - name: Dispatch release.yml
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
@@ -69,8 +69,8 @@ jobs:
           TAG="v$VERSION"
           if gh release view "$TAG" --repo "$REPO" >/dev/null 2>&1; then
             echo "Release $TAG already exists — building artifact only"
-            gh workflow run safari.yml --ref main --repo "$REPO"
+            gh workflow run release.yml --ref main --repo "$REPO"
           else
-            echo "Dispatching safari.yml with tag=$TAG (will create Release)"
-            gh workflow run safari.yml --ref main --repo "$REPO" -f tag="$TAG"
+            echo "Dispatching release.yml with tag=$TAG (will create Release)"
+            gh workflow run release.yml --ref main --repo "$REPO" -f tag="$TAG"
           fi
