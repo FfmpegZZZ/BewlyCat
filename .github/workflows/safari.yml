@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Release tag (e.g. v1.6.2). Leave blank to skip release and only upload artifact.'
+        description: Release tag (e.g. v1.6.2). Leave blank to skip release and only upload artifact.
         required: false
         default: ''
   push:
