@@ -1,0 +1,62 @@
+name: Sync upstream and build Safari
+
+on:
+  schedule:
+    # Every 6 hours at :15 UTC (Beijing: 02:15 / 08:15 / 14:15 / 20:15)
+    - cron: '15 */6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  actions: write
+
+jobs:
+  sync:
+    name: Sync main from upstream
+    runs-on: ubuntu-latest
+    outputs:
+      updated: ${{ steps.merge.outputs.updated }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          # Default GITHUB_TOKEN cannot push changes that touch .github/workflows/*.
+          # If upstream modifies a workflow file, this step will fail on push.
+          # Create a classic PAT with `repo` + `workflow` scopes, save as repo
+          # secret `SYNC_TOKEN`, and it will be used instead.
+          token: ${{ secrets.SYNC_TOKEN || github.token }}
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Merge upstream/main
+        id: merge
+        run: |
+          git remote add upstream https://github.com/keleus/BewlyCat.git
+          git fetch upstream main
+          if git merge-base --is-ancestor upstream/main HEAD; then
+            echo "upstream/main is already in HEAD — nothing to do"
+            echo "updated=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if ! git merge --no-edit upstream/main; then
+            echo "::error::Merge conflict between fork/main and upstream/main. Resolve manually."
+            exit 1
+          fi
+          git push origin main
+          echo "updated=true" >> "$GITHUB_OUTPUT"
+          echo "Merged upstream/main ($(git rev-parse upstream/main))"
+
+  build:
+    name: Trigger Safari build
+    needs: sync
+    if: needs.sync.outputs.updated == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Dispatch safari.yml
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh workflow run safari.yml --ref main --repo ${{ github.repository }}
