@@ -2,9 +2,17 @@ name: Build Safari (macOS)
 
 on:
   workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag (e.g. v1.6.2). Leave blank to skip release and only upload artifact.'
+        required: false
+        default: ''
   push:
     tags:
       - 'v*'
+
+permissions:
+  contents: write
 
 jobs:
   build-safari:
@@ -84,8 +92,13 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - name: Attach to Release (tag push only)
-        if: startsWith(github.ref, 'refs/tags/')
+      - name: Create or update Release
+        if: startsWith(github.ref, 'refs/tags/') || github.event.inputs.tag != ''
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
+          name: ${{ github.event.inputs.tag || github.ref_name }}
           files: BewlyCat-safari-macos.zip
+          generate_release_notes: true
+          make_latest: true
+          fail_on_unmatched_files: true
