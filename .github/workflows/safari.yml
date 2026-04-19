@@ -1,0 +1,89 @@
+name: Build Safari (macOS)
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-safari:
+    name: Build Safari macOS app
+    runs-on: macos-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          run_install: |
+            - args: [--frozen-lockfile]
+
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode.app
+
+      - name: Build Safari web extension resources
+        run: pnpm build-safari
+
+      - name: Convert to Xcode project
+        run: |
+          xcrun safari-web-extension-converter ./extension-safari \
+            --project-location ./extension-safari-macos \
+            --macos-only \
+            --bundle-identifier cn.celeus.bewlycat \
+            --no-open \
+            --no-prompt \
+            --force
+
+      - name: Locate generated Xcode project
+        id: locate
+        run: |
+          PROJ=$(find ./extension-safari-macos -maxdepth 3 -name '*.xcodeproj' | head -n 1)
+          SCHEME=$(basename "$PROJ" .xcodeproj)
+          echo "proj=$PROJ" >> "$GITHUB_OUTPUT"
+          echo "scheme=$SCHEME (macOS)" >> "$GITHUB_OUTPUT"
+          echo "app_name=$SCHEME.app" >> "$GITHUB_OUTPUT"
+          echo "Project: $PROJ"
+          echo "Scheme: $SCHEME (macOS)"
+
+      - name: Build .app (ad-hoc signed)
+        run: |
+          xcodebuild \
+            -project "${{ steps.locate.outputs.proj }}" \
+            -scheme "${{ steps.locate.outputs.scheme }}" \
+            -configuration Release \
+            -derivedDataPath build \
+            CODE_SIGN_IDENTITY="-" \
+            CODE_SIGN_STYLE=Manual \
+            DEVELOPMENT_TEAM="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=YES \
+            build
+
+      - name: Package .app into zip
+        run: |
+          APP_PATH=$(find build/Build/Products/Release -maxdepth 2 -name '*.app' | head -n 1)
+          echo "Found app: $APP_PATH"
+          ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" BewlyCat-safari-macos.zip
+          ls -lh BewlyCat-safari-macos.zip
+
+      - name: Upload Safari macOS app artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: BewlyCat-safari-macos
+          path: BewlyCat-safari-macos.zip
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Attach to Release (tag push only)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: BewlyCat-safari-macos.zip
