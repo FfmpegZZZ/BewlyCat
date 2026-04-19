@@ -46,12 +46,14 @@ jobs:
         id: locate
         run: |
           PROJ=$(find ./extension-safari-macos -maxdepth 3 -name '*.xcodeproj' | head -n 1)
-          SCHEME=$(basename "$PROJ" .xcodeproj)
-          echo "proj=$PROJ" >> "$GITHUB_OUTPUT"
-          echo "scheme=$SCHEME (macOS)" >> "$GITHUB_OUTPUT"
-          echo "app_name=$SCHEME.app" >> "$GITHUB_OUTPUT"
           echo "Project: $PROJ"
-          echo "Scheme: $SCHEME (macOS)"
+          xcodebuild -project "$PROJ" -list
+          SCHEME=$(xcodebuild -project "$PROJ" -list 2>/dev/null \
+            | awk '/Schemes:/{flag=1; next} flag && NF {print; exit}' \
+            | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+          echo "proj=$PROJ" >> "$GITHUB_OUTPUT"
+          echo "scheme=$SCHEME" >> "$GITHUB_OUTPUT"
+          echo "Scheme: $SCHEME"
 
       - name: Build .app (ad-hoc signed)
         run: |
