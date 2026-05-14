@@ -105,8 +105,33 @@ if (activatedPage.value !== AppPage.Search && activatedPage.value !== AppPage.Se
   topBarStore.searchKeyword = ''
 }
 
+function isFreshHomeTabConfig(tabConfig: { page: HomeSubPage, visible: boolean }[]): boolean {
+  return tabConfig.length === mainStore.homeTabs.length
+    && tabConfig.every(tab => mainStore.homeTabs.some(defaultTab => defaultTab.page === tab.page))
+}
+
+function getDefaultHomeSubPage(tabConfig: { page: HomeSubPage, visible: boolean }[]): HomeSubPage {
+  if (isFreshHomeTabConfig(tabConfig))
+    return tabConfig.find(tab => tab.visible)?.page ?? HomeSubPage.ForYou
+
+  return HomeSubPage.ForYou
+}
+
 // 添加Home页面的子页面状态
-const homeActivatedPage = ref<HomeSubPage>(HomeSubPage.ForYou)
+const homeActivatedPage = ref<HomeSubPage>(getDefaultHomeSubPage(settings.value.homePageTabVisibilityList))
+const homeActivatedPageTouched = ref<boolean>(false)
+watch(
+  () => settings.value.homePageTabVisibilityList,
+  (tabConfig) => {
+    if (homeActivatedPageTouched.value)
+      return
+
+    const defaultHomeSubPage = getDefaultHomeSubPage(tabConfig)
+    if (homeActivatedPage.value !== defaultHomeSubPage)
+      homeActivatedPage.value = defaultHomeSubPage
+  },
+  { deep: true, immediate: true },
+)
 const pages = {
   [AppPage.Home]: defineAsyncComponent(() => import('./Home/Home.vue')),
   [AppPage.Search]: defineAsyncComponent(() => import('./Search/Search.vue')),
@@ -639,6 +664,7 @@ watchEffect(async (onCleanUp) => {
 provide<BewlyAppProvider>('BEWLY_APP', {
   activatedPage,
   homeActivatedPage,
+  homeActivatedPageTouched,
   mainAppRef,
   scrollViewportRef,
   reachTop,
@@ -880,6 +906,7 @@ if (settings.value.cleanUrlArgument) {
         <template v-if="showBewlyPage">
           <div
             ref="scrollViewportRef"
+            class="bewly-scroll-viewport"
             h-inherit of-y-auto of-x-hidden
             tabindex="-1"
             style="overscroll-behavior: contain;"
@@ -921,5 +948,9 @@ if (settings.value.cleanUrlArgument) {
   > * > * {
     filter: var(--bew-filter-force-dark);
   }
+}
+
+.bewly-scroll-viewport {
+  outline: none;
 }
 </style>
