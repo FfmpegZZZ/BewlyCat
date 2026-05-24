@@ -10,6 +10,8 @@ import type { GridLayoutType } from '~/logic'
 import { settings } from '~/logic'
 import emitter from '~/utils/mitt'
 
+import SmoothLoading from './SmoothLoading.vue'
+
 /**
  * 统一的 VideoCard Grid 组件
  * 支持滚动加载和预加载（基于剩余 item 数量）
@@ -118,6 +120,18 @@ interface VideoCardGridProps<T = any> {
   loadingMoreSkeletonCount?: number
 
   /**
+   * 是否在列表底部显示固定占位的加载提示
+   * @default false
+   */
+  showLoadMoreIndicator?: boolean
+
+  /**
+   * 底部加载提示的固定高度
+   * @default '110px'
+   */
+  loadMoreIndicatorHeight?: string
+
+  /**
    * 是否为 Following 页面
    * 用于在右键菜单中默认显示"取消关注"选项
    * @default false
@@ -145,6 +159,8 @@ const props = withDefaults(defineProps<VideoCardGridProps<T>>(), {
   enableRowPadding: false,
   showLoadingMoreSkeleton: true,
   loadingMoreSkeletonCount: 10,
+  showLoadMoreIndicator: false,
+  loadMoreIndicatorHeight: '110px',
   requestFailed: false,
 })
 
@@ -158,15 +174,13 @@ const emit = defineEmits<{
 const gridContainerRef = ref<HTMLElement | null>(null)
 const loadMoreSentinelRef = ref<HTMLElement | null>(null)
 const isLoadMoreSentinelIntersecting = ref(false)
+const reachedLoadMoreDuringLoading = ref(false)
 
 // 使用共享的 Grid 布局 composable（CSS 媒体查询驱动，无 JS 计算开销）
 const { gridCssVars } = useGridLayout(() => props.gridLayout)
 
 // 获取 shadow 样式变量（避免依赖外部传入）
 const { shadowStyleVars } = useVideoCardShadowStyle()
-
-// 最少渲染数量阈值：数据量达到此值或 noMoreContent 时才显示实际内容
-const MIN_ITEMS_TO_RENDER = 20
 
 // 骨架屏数量使用固定值，避免依赖列数计算
 const dynamicSkeletonCount = computed(() => {
@@ -192,65 +206,30 @@ const MAX_CONSECUTIVE_FAILURES = 3
 // 分块渲染：渲染限制（在 displayItems 定义之前声明，避免循环依赖）
 const renderLimit = ref(0)
 
-// 是否显示初始骨架屏（数据量不足阈值且还有更多内容时）
-// 改为计算是否需要填充骨架屏，而不是完全切换
-const needSkeletonPadding = computed(() => {
+// 仅首屏空数据加载时显示骨架屏；滚动加载时不再向虚拟列表插入临时卡片。
+const showInitialSkeleton = computed(() => {
   if (props.needToLoginFirst)
     return false
-  if (props.noMoreContent)
+  if (!props.loading)
     return false
-  if (props.items.length >= MIN_ITEMS_TO_RENDER)
-    return false
-  return true
+  return props.items.length === 0
 })
 
-// 生成填充骨架屏数据（填补到最小渲染数量）
-const paddingSkeletonItems = computed(() => {
-  if (!needSkeletonPadding.value)
+// 生成首屏骨架屏数据
+const initialSkeletonItems = computed(() => {
+  if (!showInitialSkeleton.value)
     return []
 
-  const currentCount = props.items.length
-  const targetCount = dynamicSkeletonCount.value
-  const paddingCount = Math.max(0, targetCount - currentCount)
-
-  return Array.from({ length: paddingCount }, (_, i) => ({
+  return Array.from({ length: dynamicSkeletonCount.value }, (_, i) => ({
     _isSkeleton: true,
-    _skeletonId: `skeleton-padding-${i}`,
-  })) as T[]
-})
-
-// 是否正在加载更多（数据已达阈值且loading）
-const isLoadingMore = computed(() => {
-  return props.showLoadingMoreSkeleton && props.loading && props.items.length >= MIN_ITEMS_TO_RENDER
-})
-
-// 生成加载更多时的骨架屏数据（使用固定数量，由 CSS Grid 自动处理布局）
-const loadingMoreSkeletonItems = computed(() => {
-  if (!isLoadingMore.value)
-    return []
-
-  // 加载更多时显示少量骨架屏，CSS Grid 会自动处理布局
-  const totalSkeletons = Math.max(1, Math.floor(props.loadingMoreSkeletonCount))
-
-  return Array.from({ length: totalSkeletons }, (_, i) => ({
-    _isSkeleton: true,
-    _skeletonId: `skeleton-more-${i}`,
+    _skeletonId: `skeleton-initial-${i}`,
   })) as T[]
 })
 
 // 合并实际数据和骨架屏
 const displayItems = computed(() => {
-  // 数据不足时：数据 + 填充骨架屏
-  if (needSkeletonPadding.value) {
-    return [...props.items, ...paddingSkeletonItems.value]
-  }
-
-  // 加载更多时：数据 + 骨架屏
-  if (isLoadingMore.value) {
-    return [...props.items, ...loadingMoreSkeletonItems.value]
-  }
-
-  // 其他情况：只显示数据
+  if (showInitialSkeleton.value)
+    return initialSkeletonItems.value
   return props.items
 })
 
@@ -328,13 +307,16 @@ function setupIntersectionObserver() {
 
       isLoadMoreSentinelIntersecting.value = entry.isIntersecting
 
+      if (!entry.isIntersecting)
+        reachedLoadMoreDuringLoading.value = false
+
       if (entry.isIntersecting) {
         // 进入预加载区间时触发加载
         checkShouldPreload()
       }
     },
     {
-      root: null,
+      root: findScrollElement(),
       // 预加载：当列表底部进入"一个视口高度"范围内触发
       rootMargin: '0px 0px 100% 0px',
       threshold: 0,
@@ -350,6 +332,12 @@ let containerResizeObserver: ResizeObserver | null = null
 
 // 检查是否需要预加载
 function checkShouldPreload() {
+  if (props.loading) {
+    if (isLoadMoreSentinelIntersecting.value)
+      reachedLoadMoreDuringLoading.value = true
+    return
+  }
+
   if (!canLoadMore())
     return
 
@@ -417,6 +405,9 @@ function cleanupScrollListeners() {
 
 // 监听 loading 结束后检查是否需要继续加载
 watch(() => props.loading, (newLoading, oldLoading) => {
+  if (newLoading && isLoadMoreSentinelIntersecting.value && props.items.length > 0)
+    reachedLoadMoreDuringLoading.value = true
+
   if (!newLoading) {
     loadMoreRequested.value = false
     if (loadMoreRequestTimeout !== null) {
@@ -439,6 +430,11 @@ watch(() => props.loading, (newLoading, oldLoading) => {
   }
 
   if (oldLoading && !newLoading) {
+    if (reachedLoadMoreDuringLoading.value) {
+      reachedLoadMoreDuringLoading.value = false
+      return
+    }
+
     // 加载完成后，延迟检查是否需要继续加载
     nextTick(() => {
       checkShouldPreload()
@@ -453,6 +449,7 @@ watch(() => props.items.length, (newCount, oldCount) => {
     consecutiveEmptyLoads.value = 0
     consecutiveFailures.value = 0
     lastItemsCount.value = 0
+    reachedLoadMoreDuringLoading.value = false
     return
   }
 
@@ -465,6 +462,9 @@ watch(() => props.items.length, (newCount, oldCount) => {
 
   // items 更新通常意味着加载已完成或数据发生变化，允许下一次 loadMore
   loadMoreRequested.value = false
+
+  if (props.loading || reachedLoadMoreDuringLoading.value)
+    return
 
   nextTick(() => {
     checkShouldPreload()
@@ -581,6 +581,9 @@ function scheduleChunkRender(target: number) {
 
     const remaining = target - renderLimit.value
     if (remaining <= 0) {
+      nextTick(() => {
+        checkShouldPreload()
+      })
       return
     }
 
@@ -607,9 +610,6 @@ function scheduleChunkRender(target: number) {
   // 立即开始（但仍然通过 rIC/rAF yield）
   step()
 }
-
-// 限制实际渲染的 items（分块显示）
-const limitedDisplayItems = computed(() => displayItems.value.slice(0, renderLimit.value))
 
 const containerWidth = ref(0)
 const viewportHeight = ref(typeof window !== 'undefined' ? window.innerHeight : 0)
@@ -751,7 +751,7 @@ function findScrollElement(): HTMLElement | null {
   while (element) {
     const styles = window.getComputedStyle(element)
     const canScrollY = /auto|scroll|overlay/.test(styles.overflowY)
-    if (canScrollY && element.scrollHeight > element.clientHeight)
+    if (canScrollY)
       return element
     element = element.parentElement
   }
@@ -760,13 +760,14 @@ function findScrollElement(): HTMLElement | null {
 }
 
 const itemVirtualizer = useVirtualizer<HTMLElement, HTMLElement>(computed(() => ({
-  count: limitedDisplayItems.value.length,
+  count: displayItems.value.length,
   getScrollElement: () => findScrollElement(),
   estimateSize: () => estimatedItemHeight.value,
   overscan: overscanItemCount.value,
   gap: currentGridGap.value,
   lanes: currentColumnCount.value,
-  getItemKey: index => getUniqueKey(limitedDisplayItems.value[index], index),
+  getItemKey: index => getUniqueKey(displayItems.value[index], index),
+  measureElement: () => estimatedItemHeight.value,
   shouldAdjustScrollPositionOnItemSizeChange: () => false,
 })))
 
@@ -879,10 +880,13 @@ interface VirtualCardRenderItem extends VideoCardRenderItem {
   start: number
 }
 
-// 关键优化：用 TanStack lanes 直接虚拟化卡片，避免行容器与 Grid 布局互相修正。
+// 用 TanStack lanes 虚拟化卡片；测量高度固定，避免 skeleton/真实卡片切换后改写列高。
 const renderItems = computed<VirtualCardRenderItem[]>(() => {
-  const sourceItems = limitedDisplayItems.value
+  const sourceItems = displayItems.value
   return virtualItems.value.flatMap((virtualItem) => {
+    if (virtualItem.index >= renderLimit.value)
+      return []
+
     const item = sourceItems[virtualItem.index]
     if (!item)
       return []
@@ -959,7 +963,7 @@ watch(
 )
 
 watch(
-  () => limitedDisplayItems.value.length,
+  () => displayItems.value.length,
   () => {
     itemVirtualizer.value.measure()
   },
@@ -998,7 +1002,7 @@ function getUniqueKey(item: T, index: number): string | number {
 </script>
 
 <template>
-  <div>
+  <div class="video-card-grid-root">
     <!-- 需要登录 -->
     <Empty v-if="needToLoginFirst" mt-6 :description="$t('common.please_log_in_first')">
       <Button type="primary" @click="handleLogin">
@@ -1037,9 +1041,11 @@ function getUniqueKey(item: T, index: number): string | number {
           :data-index="renderItem.index"
           class="virtual-item"
           :style="{
-            top: `${renderItem.start}px`,
-            left: `${renderItem.lane * (virtualItemWidth + currentGridGap)}px`,
-            width: `${virtualItemWidth}px`,
+            'top': `${renderItem.start}px`,
+            'left': `${renderItem.lane * (virtualItemWidth + currentGridGap)}px`,
+            'width': `${virtualItemWidth}px`,
+            'minHeight': `${estimatedItemHeight}px`,
+            '--bew-video-card-virtual-height': `${estimatedItemHeight}px`,
           }"
         >
           <VideoCard
@@ -1062,12 +1068,24 @@ function getUniqueKey(item: T, index: number): string | number {
       <div ref="loadMoreSentinelRef" class="load-more-sentinel" aria-hidden="true" />
     </div>
 
+    <SmoothLoading
+      v-if="showLoadMoreIndicator"
+      class="load-more-loading"
+      :show="loading"
+      :keep-space="true"
+      :min-height="loadMoreIndicatorHeight"
+    />
+
     <!-- 无更多内容提示（仅在有数据时显示，避免与空列表提示重复） -->
     <Empty v-if="noMoreContent && !needToLoginFirst && items.length > 0" class="pb-4" :description="$t('common.no_more_content')" />
   </div>
 </template>
 
 <style lang="scss" scoped>
+.video-card-grid-root {
+  overflow-anchor: none;
+}
+
 // Grid 布局 - 使用 Tailwind CSS 标准媒体断点 + CSS 变量控制列数
 .grid-adaptive {
   display: grid;
@@ -1185,6 +1203,7 @@ function getUniqueKey(item: T, index: number): string | number {
   :deep(.video-card-container) {
     content-visibility: visible;
     contain-intrinsic-size: auto none;
+    min-height: var(--bew-video-card-virtual-height);
   }
 }
 
@@ -1208,5 +1227,14 @@ function getUniqueKey(item: T, index: number): string | number {
 .load-more-sentinel {
   width: 100%;
   height: 1px;
+  overflow-anchor: none;
+}
+
+.load-more-loading {
+  overflow-anchor: none;
+
+  :deep(.loading-container) {
+    overflow-anchor: none;
+  }
 }
 </style>
