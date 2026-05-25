@@ -47,6 +47,9 @@ const officialShortcuts: OfficialShortcut[] = [
   { key: 'F', description: t('settings.shortcuts.official.fullscreen') },
   { key: 'D', description: t('settings.shortcuts.official.danmu_toggle') },
   { key: 'M', description: t('settings.shortcuts.official.mute') },
+  { key: 'Q', description: t('settings.shortcuts.official.like') },
+  { key: 'W', description: t('settings.shortcuts.official.coin') },
+  { key: 'E', description: t('settings.shortcuts.official.favorite') },
   { key: '[', description: t('settings.shortcuts.official.prev_video') },
   { key: ']', description: t('settings.shortcuts.official.next_video') },
   { key: 'Shift + 1', description: t('settings.shortcuts.official.speed_1') },
@@ -65,7 +68,7 @@ const configurableShortcutsGroups: ShortcutGroup[] = [
     title: t('settings.shortcuts.group.general'),
     shortcuts: [
       { id: 'danmuStatus', name: t('settings.shortcuts.danmu_status'), description: t('settings.shortcuts.danmu_status_desc'), defaultKey: 'Shift+D' },
-      { id: 'webFullscreen', name: t('settings.shortcuts.web_fullscreen'), description: t('settings.shortcuts.web_fullscreen_desc'), defaultKey: 'W' },
+      { id: 'webFullscreen', name: t('settings.shortcuts.web_fullscreen'), description: t('settings.shortcuts.web_fullscreen_desc'), defaultKey: 'Shift+W' },
       { id: 'widescreen', name: t('settings.shortcuts.widescreen'), description: t('settings.shortcuts.widescreen_desc'), defaultKey: 'T' },
       { id: 'shortStepBackward', name: t('settings.shortcuts.short_step_backward'), description: t('settings.shortcuts.short_step_backward_desc'), defaultKey: 'J' },
       { id: 'longStepBackward', name: t('settings.shortcuts.long_step_backward'), description: t('settings.shortcuts.long_step_backward_desc'), defaultKey: 'Shift+J' },
@@ -357,7 +360,7 @@ function resetAllShortcuts() {
   <div>
     <!-- General Keyboard Toggle -->
     <SettingsItemGroup>
-      <SettingsItem :title="t('settings.shortcuts.enable_all_shortcuts_toggle')">
+      <SettingsItem :title="t('settings.shortcuts.enable_all_shortcuts_toggle')" right-width="auto">
         <template #desc>
           <div v-html="t('settings.shortcuts.enable_all_shortcuts_toggle_desc')" />
         </template>
@@ -369,14 +372,14 @@ function resetAllShortcuts() {
     <template v-for="group in configurableShortcutsGroups" :key="group.title">
       <SettingsItemGroup :title="group.title">
         <template v-for="shortcutDef in group.shortcuts" :key="shortcutDef.id">
-          <SettingsItem :title="shortcutDef.name" :desc="shortcutDef.description">
+          <SettingsItem :title="shortcutDef.name" :desc="shortcutDef.description" right-width="auto">
             <div class="shortcut-item-config">
               <!-- Key Configuration with Enabled Toggle -->
-              <div class="flex items-center gap-2 mb-2">
+              <div class="shortcut-config-row">
                 <!-- Shortcut Key Display/Edit -->
                 <div
                   v-if="editingShortcutId === shortcutDef.id"
-                  class="shortcut-edit-box border rounded px-3 py-1 min-w-[120px] text-center text-sm"
+                  class="shortcut-edit-box border rounded px-3 py-1 text-center text-sm"
                   tabindex="0"
                   @keydown="handleKeyDown($event, shortcutDef.id)"
                   @keyup="handleKeyUp($event, shortcutDef.id)"
@@ -434,7 +437,7 @@ function resetAllShortcuts() {
 
     <!-- Global Actions -->
     <SettingsItemGroup :title="t('settings.shortcuts.group.global_actions')">
-      <SettingsItem :title="t('settings.shortcuts.reset_all_ext_shortcuts')">
+      <SettingsItem :title="t('settings.shortcuts.reset_all_ext_shortcuts')" right-width="auto">
         <Button @click="resetAllShortcuts">
           {{ t('settings.shortcuts.reset_all_button') }}
         </Button>
@@ -448,6 +451,7 @@ function resetAllShortcuts() {
         :key="shortcut.key"
         :title="shortcut.key"
         :desc="shortcut.description"
+        right-width="auto"
       >
         <div class="shortcut-key-readonly border rounded px-3 py-1 text-sm">
           {{ shortcut.key }}
@@ -463,6 +467,24 @@ function resetAllShortcuts() {
   background-color: var(--bew-elevated-solid);
   min-width: 60px; /* Ensure a minimum width for better alignment */
   text-align: center;
+}
+
+.shortcut-config-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.shortcut-key,
+.shortcut-edit-box {
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.shortcut-edit-box {
+  min-width: 120px;
 }
 
 .shortcut-edit-box {
@@ -492,6 +514,11 @@ function resetAllShortcuts() {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+}
+
+.shortcut-actions,
+.shortcut-config-row :deep(label) {
+  flex-shrink: 0;
 }
 
 // Add some spacing to SettingsItem content for better readability
