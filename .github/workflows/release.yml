@@ -161,11 +161,29 @@ jobs:
       - name: List assets
         run: ls -lh dist/
 
+      - name: Resolve release tag
+        id: release_tag
+        env:
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+        run: |
+          if [ -n "$INPUT_TAG" ]; then
+            TAG=$(echo "$INPUT_TAG" | tr -s '[:space:]' '-' | sed 's/^-*//;s/-*$//')
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
+
+          if ! git check-ref-format "refs/tags/$TAG"; then
+            echo "::error::Invalid release tag '$TAG'. Use a valid Git tag format, e.g. v1.6.6."
+            exit 1
+          fi
+
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
       - name: Create or update Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ github.event.inputs.tag || github.ref_name }}
-          name: ${{ github.event.inputs.tag || github.ref_name }}
+          tag_name: ${{ steps.release_tag.outputs.tag }}
+          name: ${{ steps.release_tag.outputs.tag }}
           files: |
             dist/BewlyCat-chrome.zip
             dist/BewlyCat-firefox.zip
