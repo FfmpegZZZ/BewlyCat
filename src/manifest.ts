@@ -103,7 +103,10 @@ export async function getManifest() {
             ? `script-src 'self' http://localhost:${port}; object-src 'self' http://localhost:${port}`
             : 'script-src \'self\'; object-src \'self\'',
         },
-    ...isFirefox
+    // Safari (WebKit) crashes while parsing static declarative_net_request rules
+    // at extension load time. Skip the static ruleset for Safari and inject the
+    // same rules dynamically from the background script instead.
+    ...(isFirefox || isSafari)
       ? {}
       : {
           declarative_net_request: {
