@@ -1,5 +1,6 @@
 import browser from 'webextension-polyfill'
 
+import dnrRules from '../../assets/rules.json'
 import { setupAppAuthScheduler } from './appAuthScheduler'
 import { setupApiMsgListeners } from './messageListeners/api'
 import { setupTabMsgListeners } from './messageListeners/tabs'
@@ -8,6 +9,24 @@ import { initWbiKeys } from './wbiSign'
 // Initialize extension and set up message handlers
 browser.runtime.onInstalled.addListener(async () => {
   console.log('Extension installed')
+
+  // Safari (WebKit) segfaults when loading static declarative_net_request rules,
+  // so the static ruleset is omitted from the manifest for Safari (see manifest.ts).
+  // Inject the exact same rules dynamically here instead — dynamic rules persist
+  // across restarts, so applying them once on install/update is sufficient.
+  // eslint-disable-next-line node/prefer-global/process
+  if (process.env.SAFARI) {
+    try {
+      await browser.declarativeNetRequest.updateDynamicRules({
+        removeRuleIds: dnrRules.map(rule => rule.id),
+        addRules: dnrRules as browser.DeclarativeNetRequest.Rule[],
+      })
+      console.log('[BewlyCat] Safari dynamic DNR rules injected')
+    }
+    catch (error) {
+      console.error('[BewlyCat] Failed to inject Safari DNR rules:', error)
+    }
+  }
 })
 
 // 扩展启动时初始化 WBI 密钥
