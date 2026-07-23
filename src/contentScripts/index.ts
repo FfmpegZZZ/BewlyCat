@@ -4,6 +4,7 @@ import 'uno.css'
 import { createApp } from 'vue'
 
 import { useDark } from '~/composables/useDark'
+import { CONTENT_SCRIPT_PING, CONTENT_SCRIPT_PONG } from '~/constants/contentScript'
 import { BEWLY_MOUNTED, IFRAME_DARK_MODE_CHANGE, IFRAME_TOP_BAR_CHANGE } from '~/constants/globalEvents'
 import { localSettings, settings, settingsReady } from '~/logic'
 import { setupApp } from '~/logic/common-setup'
@@ -28,6 +29,21 @@ import { initAudioInterceptor, setupSettingsWatcher } from './audioInterceptor'
 import { setupIframePhotoViewerDetector } from './features/iframePhotoViewerDetector'
 import App from './views/App.vue'
 import { initVolumeNormalizationControl } from './volumeNormalizationControl'
+
+const contentScriptGlobal = globalThis as typeof globalThis & {
+  __BEWLYCAT_CONTENT_SCRIPT_INITIALIZED__?: boolean
+}
+const shouldInitializeContentScript = !contentScriptGlobal.__BEWLYCAT_CONTENT_SCRIPT_INITIALIZED__
+
+if (shouldInitializeContentScript) {
+  contentScriptGlobal.__BEWLYCAT_CONTENT_SCRIPT_INITIALIZED__ = true
+  browser.runtime.onMessage.addListener((message: unknown) => {
+    if (typeof message === 'object' && message !== null && 'type' in message && message.type === CONTENT_SCRIPT_PING)
+      return Promise.resolve(CONTENT_SCRIPT_PONG)
+
+    return false
+  })
+}
 
 const isFirefox: boolean = /Firefox/i.test(navigator.userAgent)
 const isElectronEnv = isElectron()
@@ -136,7 +152,7 @@ export function isSupportedIframePages(): boolean {
 if (isElectronEnv) {
   console.warn('[BewlyCat] Detected Electron environment, extension disabled.')
 }
-else {
+else if (shouldInitializeContentScript) {
   // Fix `OverlayScrollbars` not working in Firefox
   // https://github.com/fingerprintjs/fingerprintjs/issues/683#issuecomment-881210244
   if (isFirefox) {
@@ -343,8 +359,9 @@ else {
     setTimeout(() => {
       if (!watchLaterButtonAdded && settings.value.externalWatchLaterButton) {
         import('~/utils/watchLaterButton').then(({ addWatchLaterButton }) => {
-          addWatchLaterButton()
-          watchLaterButtonAdded = true
+          if (!settings.value.externalWatchLaterButton)
+            return
+          watchLaterButtonAdded = addWatchLaterButton()
         }).catch(err => console.error('添加稍后再看按钮失败:', err))
       }
     }, 5000) // 5秒后添加，确保页面已完全稳定
@@ -407,6 +424,7 @@ else {
         exitBewlyWidescreen()
         resetVerticalVideoZoom()
         hasAppliedPlayerMode = false // URL变化时重置标志
+        document.querySelector('.bewly-watch-later-btn')?.remove()
         watchLaterButtonAdded = false // URL变化时重置稍后再看按钮标志
         // 不再重置用户手动修改标志，保持用户的自动播放偏好设置
 
@@ -748,10 +766,8 @@ else {
         else {
         // 移除稍后再看按钮
           const existingButton = document.querySelector('.bewly-watch-later-btn')
-          if (existingButton) {
-            existingButton.remove()
-            watchLaterButtonAdded = false
-          }
+          existingButton?.remove()
+          watchLaterButtonAdded = false
         }
       }
     }
