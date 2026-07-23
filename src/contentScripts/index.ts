@@ -16,17 +16,20 @@ import { captureOriginalBilibiliTopBar, ensureOriginalBilibiliTopBarAppended, re
 import { initFavoriteDialogEnhancement } from '~/utils/favoriteDialog'
 import { runWhenIdle } from '~/utils/lazyLoad'
 import { getLocalWallpaper, hasLocalWallpaper, isLocalWallpaperUrl } from '~/utils/localWallpaper'
-import { compareVersions, injectCSS, isElectron, isHomePage, isInIframe, isNotificationPage, isVideoOrBangumiPage, isVideoPlaybackPage } from '~/utils/main'
+import { compareVersions, getCookie, injectCSS, isElectron, isHomePage, isInIframe, isNotificationPage, isVideoOrBangumiPage, isVideoPlaybackPage } from '~/utils/main'
 import { applyAutoPlayByVideoType, applyDefaultCaptionState, applyDefaultDanmakuState, defaultMode, handleVideoPageNavigation, isCollectionVideo, isPlayerDisplayModeReady, isVideoPage, startAutoExitFullscreenMonitoring, startAutoPlayUserChangeMonitoring, webFullscreen, widescreen } from '~/utils/player'
 import { initRandomPlay, resetRandomPlayInitialization } from '~/utils/randomPlay'
+import { getPluginSearchResultsUrl } from '~/utils/searchNavigation'
 import { setupShortcutHandlers } from '~/utils/shortcuts'
 import { SVG_ICONS } from '~/utils/svgIcons'
 import { openLinkInBackground } from '~/utils/tabs'
 import { initVerticalVideoZoom, resetVerticalVideoZoom } from '~/utils/verticalVideoZoom'
+import { recordVideoVisitFromUrl } from '~/utils/videoVisitHistory'
 
 import { version } from '../../package.json'
 import { initAudioInterceptor, setupSettingsWatcher } from './audioInterceptor'
 import { setupIframePhotoViewerDetector } from './features/iframePhotoViewerDetector'
+import { initVideoScreenshotControl } from './videoScreenshotControl'
 import App from './views/App.vue'
 import { initVolumeNormalizationControl } from './volumeNormalizationControl'
 
@@ -170,6 +173,29 @@ else if (shouldInitializeContentScript) {
   let hasAppliedPlayerMode = false // 添加标志变量
   let playerModeRetryTimer: ReturnType<typeof setTimeout> | undefined
   let watchLaterButtonAdded = false // 标记稍后再看按钮是否已添加
+
+  recordVideoVisitFromUrl(lastUrl)
+
+  function setupPluginSearchLinkNavigation() {
+    document.addEventListener('click', (event) => {
+      if (!settings.value.usePluginSearchResultsPage || !getCookie('DedeUserID'))
+        return
+
+      const target = event.target
+      if (!(target instanceof Element))
+        return
+
+      const anchor = target.closest('a[href]')
+      if (!(anchor instanceof HTMLAnchorElement))
+        return
+
+      const pluginSearchResultsUrl = getPluginSearchResultsUrl(anchor.href)
+      if (pluginSearchResultsUrl)
+        anchor.href = pluginSearchResultsUrl
+    }, true)
+  }
+
+  void settingsReady.then(() => setupPluginSearchLinkNavigation())
 
   function shouldApplyBewlyDesign() {
     if (settings.value.adaptToOtherPageStyles)
@@ -413,6 +439,7 @@ else if (shouldInitializeContentScript) {
 
       lastUrl = location.href
       lastVideoNavigationKey = currentVideoNavigationKey
+      recordVideoVisitFromUrl(lastUrl)
       applyBewlyDesignClasses()
 
       if (isVideoOrBangumiPage()) {
@@ -535,6 +562,17 @@ else if (shouldInitializeContentScript) {
   const removeOriginalTopBar = injectCSS(`.bili-header, #biliMainHeader { visibility: hidden !important; }`)
 
   async function onDOMLoaded() {
+    const pluginSearchResultsUrl = !isInIframe() && getPluginSearchResultsUrl(location.href)
+
+    if (pluginSearchResultsUrl) {
+      await settingsReady
+
+      if (settings.value.usePluginSearchResultsPage && getCookie('DedeUserID')) {
+        location.replace(pluginSearchResultsUrl)
+        return
+      }
+    }
+
     const changeHomePage = !isInIframe() && !settings.value.useOriginalBilibiliHomepage && isHomePage()
 
     // Remove the original Bilibili homepage if in Bilibili homepage & useOriginalBilibiliHomepage is enabled
@@ -618,6 +656,7 @@ else if (shouldInitializeContentScript) {
     if (settings.value.enableVolumeNormalization)
       initAudioInterceptor()
     initVolumeNormalizationControl()
+    initVideoScreenshotControl()
 
     // Initialize Favorite Dialog Enhancement (for video pages)
     if (isVideoOrBangumiPage()) {
@@ -625,10 +664,14 @@ else if (shouldInitializeContentScript) {
     }
   }
 
-  if (document.readyState !== 'loading')
-    onDOMLoaded()
-  else
-    document.addEventListener('DOMContentLoaded', () => onDOMLoaded())
+  if (document.readyState !== 'loading') {
+    void onDOMLoaded()
+  }
+  else {
+    document.addEventListener('DOMContentLoaded', () => {
+      void onDOMLoaded()
+    })
+  }
 
   function injectAppWhenIdle() {
     return new Promise<void>((resolve) => {
