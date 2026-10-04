@@ -25,10 +25,9 @@ export async function getManifest() {
     //   open_in_tab: true,
     // },
 
-    // Setting `persistent` to true in Manifest V3 results in an error in Firefox
-    // https://developer.mozilla.org/en-US/docs/Mozilla/Add-ons/WebExtensions/manifest.json/background
+    // Firefox 和 Safari 使用普通后台脚本，MV3 默认采用非持久化后台。
     background: (isFirefox || isSafari)
-      ? { scripts: ['./dist/background/index.js'], persistent: isFirefox ? undefined : false }
+      ? { scripts: ['./dist/background/index.js'] }
       : { service_worker: './dist/background/index.js', type: 'module' },
 
     icons: {

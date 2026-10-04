@@ -75,7 +75,7 @@
 
 #### macOS Safari
 
-要求 Safari 26 或更新版本。扩展使用的请求方法过滤规则需要 Safari 26；Safari 版本支持情况见 [MDN 兼容表](https://developer.mozilla.org/en-US/docs/Mozilla/Add-ons/WebExtensions/API/declarativeNetRequest/RuleCondition#browser_compatibility)。
+要求 macOS 14（Sonoma）或更新系统，以及 Safari 26 或更新版本。扩展使用的请求方法过滤规则需要 Safari 26；Safari 版本支持情况见 [MDN 兼容表](https://developer.mozilla.org/en-US/docs/Mozilla/Add-ons/WebExtensions/API/declarativeNetRequest/RuleCondition#browser_compatibility)。
 
 1. 在此 fork 的 [Releases](https://github.com/FfmpegZZZ/BewlyCat/releases) 或 [Build Release 工作流](https://github.com/FfmpegZZZ/BewlyCat/actions/workflows/release.yml) 下载 `BewlyCat-safari-macos.zip`。Actions 的 artifact 解压后还需要解压其中的应用压缩包。
 2. 将解压后的 `BewlyCat.app` 移到“应用程序”并打开。当前包使用本地临时签名，未经过 Apple 公证；macOS 首次打开可能需要在“系统设置 → 隐私与安全性”中允许打开。
