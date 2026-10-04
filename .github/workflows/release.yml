@@ -8,6 +8,9 @@ on:
         required: false
         default: ''
   push:
+    branches:
+      - main
+      - 'codex/**'
     tags:
       - 'v*'
   pull_request:
