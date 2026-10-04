@@ -79,7 +79,7 @@
 
 1. 在此 fork 的 [Releases](https://github.com/FfmpegZZZ/BewlyCat/releases) 或 [Build Release 工作流](https://github.com/FfmpegZZZ/BewlyCat/actions/workflows/release.yml) 下载 `BewlyCat-safari-macos.zip`。Actions 的 artifact 解压后还需要解压其中的应用压缩包。
 2. 将解压后的 `BewlyCat.app` 移到“应用程序”并打开。当前包使用本地临时签名，未经过 Apple 公证；macOS 首次打开可能需要在“系统设置 → 隐私与安全性”中允许打开。
-3. 在 Safari 设置的“高级”中开启开发者功能，然后在“开发”菜单中开启“允许未签名的扩展”。退出 Safari 后需重新开启该选项，详见 [Apple 开发文档](https://developer.apple.com/documentation/safariservices/building-a-safari-app-extension)。
+3. 在 Safari 设置的“高级”中开启“显示网页开发者功能”，然后在设置的“开发者”页开启“允许未签名的扩展”。退出 Safari 后需重新开启该选项，详见 [Apple 开发文档](https://developer.apple.com/documentation/safariservices/running-your-safari-web-extension)。
 4. 在“Safari → 设置 → 扩展”中启用 BewlyCat，并允许它访问 `bilibili.com` 和 `hdslb.com`，随后刷新 B 站页面。
 
 包同时包含 Apple Silicon 和 Intel 架构。正式分发需要自己的 Apple Developer 签名和公证，详见 [Safari 扩展分发文档](https://developer.apple.com/documentation/safariservices/distributing-your-safari-web-extension)。
