@@ -880,6 +880,7 @@ settings:
     decrease_video_size_desc: 縮細影片畫面大細。
     enable_all_shortcuts_toggle: 啓用鍵盤快捷鍵
     enable_all_shortcuts_toggle_desc: 啓用或停用所有鍵盤快捷鍵功能。
+    mac_modifier_hint: Mac 修飾鍵：⌘ Command、⌥ Option、⌃ Control、⇧ Shift。撳編輯之後可以直接錄低組合鍵。預設撳 = 加快播放，唔使撳 Shift。
     group:
       fullscreen_mode: 全螢幕模式快捷鍵
       general: 一般快捷鍵

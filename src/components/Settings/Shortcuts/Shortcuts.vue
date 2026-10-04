@@ -10,7 +10,7 @@ import type {
   BaseShortcutSetting,
   ShortcutsSettings,
 } from '~/logic/storage'
-import { getShortcutKeyParts } from '~/utils/keyboard'
+import { formatShortcutKey, getShortcutKeyParts, isMacPlatform, normalizeShortcutKey } from '~/utils/keyboard'
 import { setupShortcutHandlers } from '~/utils/shortcuts'
 
 import SettingsItem from '../components/SettingsItem.vue'
@@ -20,6 +20,7 @@ import ShortcutSection from './ShortcutSection.vue'
 
 const { t } = useI18n()
 const toast = useToast()
+const isMac = isMacPlatform()
 
 // --- 类型定义 ---
 interface OfficialShortcut {
@@ -110,6 +111,7 @@ const configurableShortcutsGroups: ShortcutGroup[] = [
 // --- Reactive State ---
 const editingShortcutId = ref<ConfigurableShortcutId | null>(null)
 const currentKeyCombo = ref<string[]>([])
+const currentKeyAlias = ref('')
 
 const vFocusShortcutEditor = {
   mounted(element: HTMLElement) {
@@ -126,13 +128,12 @@ function getDefaultShortcutSetting(id: ConfigurableShortcutId): BaseShortcutSett
   return originalSettings.shortcuts?.[id]
 }
 
-// --- Conflict Detection ---
-// Only extension shortcuts block each other. Official Bilibili shortcuts are
-// intentionally allowed so extension actions can override them at runtime.
-function checkShortcutConflict(key: string, currentId: ConfigurableShortcutId): { hasConflict: boolean, conflictInfo: { id: string, name: string } | null } {
+// 只检查扩展快捷键；允许覆盖 B 站官方快捷键。
+function checkShortcutConflict(key: string, currentId: ConfigurableShortcutId, alternateKey = ''): { hasConflict: boolean, conflictInfo: { id: string, name: string } | null } {
   if (!settings.value.shortcuts)
     return { hasConflict: false, conflictInfo: null }
 
+  const normalizedKeys = [key, alternateKey].filter(Boolean).map(normalizeShortcutKey)
   for (const group of configurableShortcutsGroups) {
     for (const shortcut of group.shortcuts) {
       if (shortcut.id === currentId)
@@ -140,7 +141,7 @@ function checkShortcutConflict(key: string, currentId: ConfigurableShortcutId): 
 
       const shortcutSetting = settings.value.shortcuts[shortcut.id]
       if (shortcutSetting && typeof shortcutSetting === 'object' && shortcutSetting.key) {
-        if (shortcutSetting.key.toLowerCase() === key.toLowerCase()) {
+        if (normalizedKeys.includes(normalizeShortcutKey(shortcutSetting.key))) {
           return {
             hasConflict: true,
             conflictInfo: {
@@ -160,6 +161,7 @@ function checkShortcutConflict(key: string, currentId: ConfigurableShortcutId): 
 function startEditShortcut(id: ConfigurableShortcutId) {
   editingShortcutId.value = id
   currentKeyCombo.value = [] // 重置当前按键组合
+  currentKeyAlias.value = ''
 }
 
 function saveShortcutKey(id: ConfigurableShortcutId, newKey: string) {
@@ -180,6 +182,7 @@ function saveShortcutKey(id: ConfigurableShortcutId, newKey: string) {
   // Exit editing mode
   editingShortcutId.value = null
   currentKeyCombo.value = [] // 重置当前按键组合
+  currentKeyAlias.value = ''
 
   // Re-register shortcuts to ensure the new shortcut is immediately available
   try {
@@ -193,6 +196,7 @@ function saveShortcutKey(id: ConfigurableShortcutId, newKey: string) {
 function cancelEdit() {
   editingShortcutId.value = null
   currentKeyCombo.value = [] // 重置当前按键组合
+  currentKeyAlias.value = ''
 }
 
 function handleKeyDown(event: KeyboardEvent, id: ConfigurableShortcutId) {
@@ -202,29 +206,29 @@ function handleKeyDown(event: KeyboardEvent, id: ConfigurableShortcutId) {
   event.preventDefault()
   event.stopPropagation()
 
+  // 在按下时判断取消键，避免先释放 Command 后误取消 Command+Backspace 等组合。
+  if ((event.key === 'Escape' || event.key === 'Backspace')
+    && !event.ctrlKey && !event.altKey && !event.shiftKey && !event.metaKey) {
+    cancelEdit()
+    return
+  }
+
   const keyParts = getShortcutKeyParts(event)
   if (!keyParts.length)
     return
 
   // 录制和执行使用相同的按键组合，包含 macOS 的 Command 键。
   currentKeyCombo.value = keyParts
+  // Option 的原始字符仍能匹配旧配置，冲突检测需同时保留这个别名。
+  currentKeyAlias.value = isMac && event.altKey ? getShortcutKeyParts(event, event.key).join('+') : ''
 }
 
 function handleKeyUp(event: KeyboardEvent, id: ConfigurableShortcutId) {
   if (editingShortcutId.value !== id)
     return
 
-  // 如果按下的是 Escape 键，取消编辑
-  if (event.key === 'Escape') {
-    cancelEdit()
-    return
-  }
-
-  // 如果按下的是 Backspace 键，且没有其他按键，取消编辑
-  if (event.key === 'Backspace' && !event.ctrlKey && !event.altKey && !event.shiftKey && !event.metaKey) {
-    cancelEdit()
-    return
-  }
+  event.preventDefault()
+  event.stopPropagation()
 
   // 如果所有按键都已释放，保存快捷键
   if (!event.ctrlKey && !event.altKey && !event.shiftKey && !event.metaKey) {
@@ -237,7 +241,7 @@ function handleKeyUp(event: KeyboardEvent, id: ConfigurableShortcutId) {
         return
       }
 
-      const conflictResult = checkShortcutConflict(keyCombo, id)
+      const conflictResult = checkShortcutConflict(keyCombo, id, currentKeyAlias.value)
 
       if (conflictResult.hasConflict && conflictResult.conflictInfo) {
         toast.warning(t('settings.shortcuts.conflict', { name: conflictResult.conflictInfo.name }))
@@ -330,6 +334,10 @@ function undoResetAllShortcuts() {
       </SettingsItem>
     </SettingsItemGroup>
 
+    <p v-if="isMac" class="mb-4 text-sm text-$bew-text-2">
+      {{ t('settings.shortcuts.mac_modifier_hint') }}
+    </p>
+
     <!-- Configurable Extension Shortcuts -->
     <template v-for="group in configurableShortcutsGroups" :key="group.title">
       <ShortcutSection
@@ -351,10 +359,10 @@ function undoResetAllShortcuts() {
                   @keyup="handleKeyUp($event, shortcutDef.id)"
                   @blur="cancelEdit"
                 >
-                  {{ currentKeyCombo.length > 0 ? currentKeyCombo.join('+') : t('settings.shortcuts.press_keys') }}
+                  {{ currentKeyCombo.length > 0 ? formatShortcutKey(currentKeyCombo.join('+'), isMac) : t('settings.shortcuts.press_keys') }}
                 </div>
                 <div v-else class="shortcut-key border rounded px-3 py-1 text-sm">
-                  {{ getShortcutSetting(shortcutDef.id)?.key || shortcutDef.defaultKey }}
+                  {{ formatShortcutKey(getShortcutSetting(shortcutDef.id)?.key || shortcutDef.defaultKey, isMac) }}
                 </div>
 
                 <!-- Action Buttons -->
@@ -406,12 +414,12 @@ function undoResetAllShortcuts() {
       <SettingsItem
         v-for="shortcut in officialShortcuts"
         :key="shortcut.key"
-        :title="shortcut.key"
+        :title="formatShortcutKey(shortcut.key, isMac)"
         :desc="shortcut.description"
         right-width="auto"
       >
         <div class="shortcut-key-readonly border rounded px-3 py-1 text-sm">
-          {{ shortcut.key }}
+          {{ formatShortcutKey(shortcut.key, isMac) }}
         </div>
       </SettingsItem>
     </ShortcutSection>

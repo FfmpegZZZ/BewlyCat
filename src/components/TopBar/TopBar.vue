@@ -10,7 +10,7 @@ import { VideoPageTopBarConfig } from '~/enums/appEnums'
 import { settings } from '~/logic'
 import { useTopBarStore } from '~/stores/topBarStore'
 import { isBewlyWidescreenActive } from '~/utils/bewlyWidescreen'
-import { findLeafActiveElement } from '~/utils/element'
+import { isKeyboardInput } from '~/utils/keyboard'
 import { isHomePage, isUserSpacePage, isVideoOrBangumiPage } from '~/utils/main'
 import emitter from '~/utils/mitt'
 import { isComponentVisible } from '~/utils/topBarBadge'
@@ -691,13 +691,10 @@ onUnmounted(() => {
 
 // 快捷键
 onKeyStroke('/', (event: KeyboardEvent) => {
-  const target = event.target as HTMLElement | null
-  if (target && (['INPUT', 'TEXTAREA'].includes(target.tagName) || target.isContentEditable))
+  if (settings.value.keyboard === false || event.isComposing
+    || event.ctrlKey || event.altKey || event.shiftKey || event.metaKey || isKeyboardInput(event)) {
     return
-
-  const activeElement = findLeafActiveElement(document) as HTMLElement | undefined
-  if (activeElement && (['INPUT', 'TEXTAREA'].includes(activeElement.tagName) || activeElement.isContentEditable))
-    return
+  }
 
   event.preventDefault()
   toggleTopBarVisible(true)

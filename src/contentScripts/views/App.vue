@@ -1421,8 +1421,10 @@ onMounted(() => {
 
     // Windows/Linux：输入时保留 Home 键的原生光标操作。
     stopHomeKeyStroke = onKeyStroke('Home', (e) => {
-      if (settings.value.keyboard === false || e.isComposing || isKeyboardInput(e))
+      if (settings.value.keyboard === false || e.isComposing
+        || e.ctrlKey || e.altKey || e.shiftKey || e.metaKey || isKeyboardInput(e)) {
         return
+      }
 
       handleThrottledBackToTop()
       focusScrollViewport({ force: true })

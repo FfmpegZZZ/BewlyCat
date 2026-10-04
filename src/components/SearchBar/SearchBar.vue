@@ -9,7 +9,7 @@ import { resolveSearchBarCharacterUrl } from '~/constants/imgs'
 import { AppPage } from '~/enums/appEnums'
 import { settings } from '~/logic'
 import api from '~/utils/api'
-import { findLeafActiveElement } from '~/utils/element'
+import { isKeyboardInput } from '~/utils/keyboard'
 import { isHomePage } from '~/utils/main'
 import { buildKeywordSearchUrl, navigateToPluginSearchResults, navigateToPluginSearchResultsInPlace, openSearchResults } from '~/utils/searchNavigation'
 
@@ -304,16 +304,10 @@ onBeforeUnmount(() => {
 })
 
 onKeyStroke('/', (e: KeyboardEvent) => {
-  // Reference: https://github.com/polywock/globalSpeed/blob/3705ac836402b324550caf92aa65075b2f2347c6/src/contentScript/ConfigSync.ts#L94
-  const target = e.target as HTMLElement
-  const ignoreTagNames = ['INPUT', 'TEXTAREA']
-  if (target && (ignoreTagNames.includes(target.tagName) || target.isContentEditable))
+  // 仅裸斜杠聚焦搜索，保留 Mac 修饰组合和输入框中的原生操作。
+  if (settings.value.keyboard === false || e.isComposing
+    || e.ctrlKey || e.altKey || e.shiftKey || e.metaKey || isKeyboardInput(e)) {
     return
-
-  const activeElement = findLeafActiveElement(document) as HTMLElement | undefined
-  if (activeElement && target !== activeElement) {
-    if (ignoreTagNames.includes(activeElement.tagName) || activeElement.isContentEditable)
-      return
   }
 
   e.preventDefault()
@@ -528,8 +522,8 @@ function getKeyboardSelectionContext() {
 }
 
 function handleKeyUp(e: KeyboardEvent) {
-  // Skip the key event triggered by IME
-  if (e.isComposing)
+  // 保留输入法及 Option/Command 等组合键的原生光标操作。
+  if (e.isComposing || e.ctrlKey || e.altKey || e.shiftKey || e.metaKey)
     return
 
   const context = getKeyboardSelectionContext()
@@ -546,8 +540,8 @@ function handleKeyUp(e: KeyboardEvent) {
 }
 
 function handleKeyDown(e: KeyboardEvent) {
-  // Skip the key event triggered by IME
-  if (e.isComposing)
+  // 保留输入法及 Option/Command 等组合键的原生光标操作。
+  if (e.isComposing || e.ctrlKey || e.altKey || e.shiftKey || e.metaKey)
     return
 
   const context = getKeyboardSelectionContext()

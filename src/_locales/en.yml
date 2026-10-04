@@ -975,6 +975,7 @@ settings:
     title: Keyboard Shortcuts
     enable_all_shortcuts_toggle: Enable Keyboard Shortcuts
     enable_all_shortcuts_toggle_desc: Enable or disable all keyboard shortcuts functionality
+    mac_modifier_hint: 'Mac modifier keys: ⌘ Command, ⌥ Option, ⌃ Control, ⇧ Shift. Click edit to record a key combination. By default, press = to increase playback speed without Shift.'
     group:
       official_bilibili: Bilibili Official Shortcuts
       homepage: Homepage Shortcuts

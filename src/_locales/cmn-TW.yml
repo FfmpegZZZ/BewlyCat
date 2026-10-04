@@ -875,6 +875,7 @@ settings:
     title: 快捷鍵
     enable_all_shortcuts_toggle: 啟用鍵盤快捷鍵
     enable_all_shortcuts_toggle_desc: 啟用或停用所有鍵盤快捷鍵功能
+    mac_modifier_hint: Mac 修飾鍵：⌘ Command、⌥ Option、⌃ Control、⇧ Shift。點選編輯後可直接錄製組合鍵。預設按 = 加速播放，無需按 Shift。
     group:
       official_bilibili: Bilibili 官方快捷鍵
       general: 常規快捷鍵
