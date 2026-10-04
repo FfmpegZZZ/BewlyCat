@@ -16,11 +16,13 @@ export default defineConfig(() => ({
     // fs.copySync(path.resolve(__dirname, './src/inject/index.js'), path.resolve(__dirname, `./${outDir}/inject/index.js`))
   },
   outDir,
-  format: ['esm'],
-  target: 'esnext',
+  // Safari 的 background.scripts 按普通脚本加载，输出完整打包的 IIFE。
+  format: isSafari ? ['iife'] : ['esm'],
+  outExtension: () => ({ js: '.js' }),
+  target: isSafari ? 'safari18' : 'esnext',
   ignoreWatch: ['**/extension/**', '**/extension-firefox/**', '**/extension-safari/**'],
   splitting: false,
-  noExternal: ['md5'],
+  noExternal: isSafari ? [/.*/] : ['md5'],
   sourcemap: false, // https://github.com/vitejs/vite-plugin-vue/issues/35
   define: {
     '__DEV__': JSON.stringify(isDev),

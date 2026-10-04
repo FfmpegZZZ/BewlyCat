@@ -10,18 +10,72 @@ on:
   push:
     tags:
       - 'v*'
+  pull_request:
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event.inputs.tag || 'artifacts' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+defaults:
+  run:
+    shell: bash
 
 jobs:
+  prepare:
+    name: Verify build source and release tag
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.source.outputs.sha }}
+      tag: ${{ steps.source.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Resolve build source and release tag
+        id: source
+        env:
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+        run: |
+          SOURCE_SHA=$(git rev-parse HEAD)
+          TAG=""
+          if [ -n "$INPUT_TAG" ]; then
+            TAG=$(echo "$INPUT_TAG" | tr -s '[:space:]' '-' | sed 's/^-*//;s/-*$//')
+          elif [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            TAG="$GITHUB_REF_NAME"
+          fi
+
+          if [ -n "$TAG" ] || [ -n "$INPUT_TAG" ]; then
+            if ! git check-ref-format "refs/tags/$TAG"; then
+              echo "::error::无效的发布标签 '$TAG'，请使用有效的 Git 标签，例如 v1.6.6。"
+              exit 1
+            fi
+            # 已存在的标签必须指向本次构建源码，避免覆盖为其他提交构建的附件。
+            if TAG_SHA=$(git rev-parse --verify "refs/tags/$TAG^{commit}" 2>/dev/null); then
+              if [ "$TAG_SHA" != "$SOURCE_SHA" ]; then
+                echo "::error::标签 '$TAG' 指向 $TAG_SHA，本次构建源码为 $SOURCE_SHA。请选择该标签运行，或使用新的标签。"
+                exit 1
+              fi
+            fi
+          fi
+
+          echo "sha=$SOURCE_SHA" >> "$GITHUB_OUTPUT"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
   build-extensions:
     name: Build Chrome and Firefox extensions
+    needs: prepare
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -70,11 +124,14 @@ jobs:
 
   build-safari:
     name: Build Safari macOS app
+    needs: prepare
     runs-on: macos-latest
     timeout-minutes: 30
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.prepare.outputs.sha }}
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
@@ -106,12 +163,18 @@ jobs:
       - name: Locate generated Xcode project
         id: locate
         run: |
-          PROJ=$(find ./extension-safari-macos -maxdepth 3 -name '*.xcodeproj' | head -n 1)
+          PROJECTS=()
+          while IFS= read -r -d '' PROJECT; do
+            PROJECTS+=("$PROJECT")
+          done < <(find ./extension-safari-macos -maxdepth 3 -type d -name '*.xcodeproj' -print0)
+          if [ "${#PROJECTS[@]}" -ne 1 ]; then
+            echo "::error::应生成一个 Xcode 项目，实际发现 ${#PROJECTS[@]} 个。"
+            exit 1
+          fi
+          PROJ="${PROJECTS[0]}"
           echo "Project: $PROJ"
-          xcodebuild -project "$PROJ" -list
-          SCHEME=$(xcodebuild -project "$PROJ" -list 2>/dev/null \
-            | awk '/Schemes:/{flag=1; next} flag && NF {print; exit}' \
-            | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+          xcodebuild -project "$PROJ" -list -json > xcode-project.json
+          SCHEME=$(jq -er '.project.schemes[0] | select(type == "string" and length > 0)' xcode-project.json)
           echo "proj=$PROJ" >> "$GITHUB_OUTPUT"
           echo "scheme=$SCHEME" >> "$GITHUB_OUTPUT"
           echo "Scheme: $SCHEME"
@@ -122,7 +185,10 @@ jobs:
             -project "${{ steps.locate.outputs.proj }}" \
             -scheme "${{ steps.locate.outputs.scheme }}" \
             -configuration Release \
+            -destination 'generic/platform=macOS' \
             -derivedDataPath build \
+            ARCHS="arm64 x86_64" \
+            ONLY_ACTIVE_ARCH=NO \
             CODE_SIGN_IDENTITY="-" \
             CODE_SIGN_STYLE=Manual \
             DEVELOPMENT_TEAM="" \
@@ -130,11 +196,32 @@ jobs:
             CODE_SIGNING_ALLOWED=YES \
             build
 
-      - name: Package .app into zip
+      - name: Verify and package .app into zip
         run: |
-          APP_PATH=$(find build/Build/Products/Release -maxdepth 2 -name '*.app' | head -n 1)
+          APP_PATHS=()
+          while IFS= read -r -d '' APP; do
+            APP_PATHS+=("$APP")
+          done < <(find build/Build/Products/Release -maxdepth 1 -type d -name '*.app' -print0)
+          if [ "${#APP_PATHS[@]}" -ne 1 ]; then
+            echo "::error::应生成一个 macOS 应用，实际发现 ${#APP_PATHS[@]} 个。"
+            exit 1
+          fi
+          APP_PATH="${APP_PATHS[0]}"
+          shopt -s nullglob
+          EXTENSION_PATHS=("$APP_PATH"/Contents/PlugIns/*.appex)
+          if [ "${#EXTENSION_PATHS[@]}" -eq 0 ]; then
+            echo "::error::macOS 应用中缺少 Safari 扩展。"
+            exit 1
+          fi
+          # 同时验证宿主应用和扩展，确保 Intel 与 Apple Silicon 均可运行。
+          for BUNDLE_PATH in "$APP_PATH" "${EXTENSION_PATHS[@]}"; do
+            EXECUTABLE=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$BUNDLE_PATH/Contents/Info.plist")
+            lipo "$BUNDLE_PATH/Contents/MacOS/$EXECUTABLE" -verify_arch arm64 x86_64
+          done
+          codesign --verify --deep --strict --verbose=2 "$APP_PATH"
           echo "Found app: $APP_PATH"
           ditto -c -k --sequesterRsrc --keepParent "$APP_PATH" BewlyCat-safari-macos.zip
+          test -s BewlyCat-safari-macos.zip
           ls -lh BewlyCat-safari-macos.zip
 
       - name: Upload Safari artifact
@@ -147,9 +234,11 @@ jobs:
 
   release:
     name: Publish Release
-    needs: [build-extensions, build-safari]
-    if: startsWith(github.ref, 'refs/tags/') || github.event.inputs.tag != ''
+    needs: [prepare, build-extensions, build-safari]
+    if: github.event_name != 'pull_request' && needs.prepare.outputs.tag != ''
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
 
     steps:
       - name: Download all artifacts
@@ -161,29 +250,12 @@ jobs:
       - name: List assets
         run: ls -lh dist/
 
-      - name: Resolve release tag
-        id: release_tag
-        env:
-          INPUT_TAG: ${{ github.event.inputs.tag }}
-        run: |
-          if [ -n "$INPUT_TAG" ]; then
-            TAG=$(echo "$INPUT_TAG" | tr -s '[:space:]' '-' | sed 's/^-*//;s/-*$//')
-          else
-            TAG="${GITHUB_REF_NAME}"
-          fi
-
-          if ! git check-ref-format "refs/tags/$TAG"; then
-            echo "::error::Invalid release tag '$TAG'. Use a valid Git tag format, e.g. v1.6.6."
-            exit 1
-          fi
-
-          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-
       - name: Create or update Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ steps.release_tag.outputs.tag }}
-          name: ${{ steps.release_tag.outputs.tag }}
+          tag_name: ${{ needs.prepare.outputs.tag }}
+          name: ${{ needs.prepare.outputs.tag }}
+          target_commitish: ${{ needs.prepare.outputs.sha }}
           files: |
             dist/BewlyCat-chrome.zip
             dist/BewlyCat-firefox.zip

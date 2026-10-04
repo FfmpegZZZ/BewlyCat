@@ -10,6 +10,7 @@ import type {
   BaseShortcutSetting,
   ShortcutsSettings,
 } from '~/logic/storage'
+import { getShortcutKeyParts } from '~/utils/keyboard'
 import { setupShortcutHandlers } from '~/utils/shortcuts'
 
 import SettingsItem from '../components/SettingsItem.vue'
@@ -201,56 +202,11 @@ function handleKeyDown(event: KeyboardEvent, id: ConfigurableShortcutId) {
   event.preventDefault()
   event.stopPropagation()
 
-  // 忽略单独的修饰键
-  if (['Control', 'Alt', 'Shift', 'Meta', 'Dead'].includes(event.key))
+  const keyParts = getShortcutKeyParts(event)
+  if (!keyParts.length)
     return
 
-  // Update current key combo
-  const keyParts: string[] = []
-  if (event.ctrlKey)
-    keyParts.push('Ctrl')
-  if (event.altKey)
-    keyParts.push('Alt')
-  if (event.shiftKey)
-    keyParts.push('Shift')
-  if (event.metaKey)
-    keyParts.push('Meta')
-
-  // 处理主按键
-  let mainKey = event.key
-  if (mainKey === ' ') {
-    mainKey = 'Space'
-  }
-  // 对于单字符按键转为大写
-  else if (mainKey.length === 1) {
-    mainKey = mainKey.toUpperCase()
-  }
-  // 特殊按键处理
-  else if (mainKey === 'ArrowUp') {
-    mainKey = '↑'
-  }
-  else if (mainKey === 'ArrowDown') {
-    mainKey = '↓'
-  }
-  else if (mainKey === 'ArrowLeft') {
-    mainKey = '←'
-  }
-  else if (mainKey === 'ArrowRight') {
-    mainKey = '→'
-  }
-  else if (mainKey === 'Backspace') {
-    mainKey = 'Backspace'
-  }
-  else if (mainKey === 'Escape') {
-    mainKey = 'Esc'
-  }
-
-  // 只有当主按键不是修饰键时才添加
-  if (!['Control', 'Alt', 'Shift', 'Meta', 'Dead'].includes(mainKey)) {
-    keyParts.push(mainKey)
-  }
-
-  // Update the current key combo
+  // 录制和执行使用相同的按键组合，包含 macOS 的 Command 键。
   currentKeyCombo.value = keyParts
 }
 

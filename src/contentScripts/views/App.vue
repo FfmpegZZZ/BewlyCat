@@ -24,6 +24,7 @@ import { useMainStore } from '~/stores/mainStore'
 import { useSettingsStore } from '~/stores/settingsStore'
 import { useTopBarStore } from '~/stores/topBarStore'
 import { setOriginalBilibiliTopBarScrolled } from '~/utils/bilibiliTopBar'
+import { isKeyboardInput } from '~/utils/keyboard'
 import { isHomePage, isInIframe, isNotificationPage, isSearchResultsPage, isVideoOrBangumiPage, openLinkToNewTab, queryDomUntilFound, scrollToTop } from '~/utils/main'
 import emitter from '~/utils/mitt'
 import { applyPendingSettingsMigrations, formatSettingsMigrationConfirmMessage, getPendingSettingsMigrationChoices, hasPendingSettingsMigrations } from '~/utils/settingsMigration'
@@ -1364,6 +1365,9 @@ let stopHomeKeyStroke: (() => void) | null = null
 let stopLoadMoreIntersectionObserver: (() => void) | null = null
 
 function handleMetaHomeKeydown(e: KeyboardEvent) {
+  if (settings.value.keyboard === false || e.isComposing || isKeyboardInput(e))
+    return
+
   if (e.key === 'ArrowUp' && e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey) {
     handleThrottledBackToTop()
     focusScrollViewport({ force: true })
@@ -1415,14 +1419,17 @@ onMounted(() => {
   if (isHomePage()) {
     focusScrollViewport()
 
-    // Windows/Linux: 监听 Home 键
+    // Windows/Linux：输入时保留 Home 键的原生光标操作。
     stopHomeKeyStroke = onKeyStroke('Home', (e) => {
+      if (settings.value.keyboard === false || e.isComposing || isKeyboardInput(e))
+        return
+
       handleThrottledBackToTop()
       focusScrollViewport({ force: true })
       e.preventDefault()
     })
 
-    // macOS: 使用原生事件监听 Command+↑ 组合键
+    // macOS：监听 Command+↑，输入框中保留原生光标操作。
     document.addEventListener('keydown', handleMetaHomeKeydown)
   }
 

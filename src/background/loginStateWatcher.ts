@@ -21,6 +21,10 @@ let broadcastTimer: ReturnType<typeof setTimeout> | null = null
  * 例行轮换等值变化会被标签页侧的 mid 比对自然过滤。
  */
 export function setupLoginStateWatcher() {
+  // Safari 不提供 Cookie 变更事件，页面仍会在恢复可见时校正登录态。
+  if (!browser.cookies?.onChanged?.addListener)
+    return
+
   browser.cookies.onChanged.addListener(({ cookie }) => {
     const normalizedDomain = cookie.domain.trim().toLowerCase().replace(/^\.+/, '')
     const isBilibiliDomain = normalizedDomain === 'bilibili.com' || normalizedDomain.endsWith('.bilibili.com')

@@ -1,5 +1,6 @@
 import { settings } from '~/logic'
 import { applyBewlyWidescreen, exitBewlyWidescreen, isBewlyWidescreenActive, isBewlyWidescreenEngaged } from '~/utils/bewlyWidescreen'
+import { isKeyboardInput, matchesShortcut } from '~/utils/keyboard'
 import { isVideoOrBangumiPage, isVideoPlaybackPage } from '~/utils/main'
 // 导入需要的函数
 import {
@@ -128,12 +129,8 @@ export function setupShortcutHandlers() {
 
   // 创建新的键盘事件监听器
   keydownListener = (e: KeyboardEvent) => {
-    // 快速检查：如果在输入框中或按下meta键，直接返回
-    if (e.target instanceof HTMLInputElement
-      || e.target instanceof HTMLTextAreaElement
-      || (e.target as HTMLElement).isContentEditable
-      || (e.target instanceof HTMLElement && e.target.tagName === 'BILI-COMMENTS')
-      || e.metaKey) {
+    // 输入时保留原生键盘操作，未配置的 Command 组合也不拦截。
+    if (settings.value.keyboard === false || e.isComposing || isKeyboardInput(e)) {
       return
     }
 
@@ -155,9 +152,6 @@ export function setupShortcutHandlers() {
 
     // 获取播放器元素
     const player = document.querySelector('.bpx-player') || document.querySelector('.bilibili-player')
-
-    // 生成当前按键组合
-    const keyCombo = generateKeyCombo(e)
 
     // 遍历所有注册的快捷键
     try {
@@ -187,9 +181,7 @@ export function setupShortcutHandlers() {
             continue
 
           // 如果快捷键匹配
-          // 兼容：配置为 '+' 时，允许直接按 '=' 键触发（标准键盘上 '+' 需要 Shift+=）
-          if (configKey.toLowerCase() === keyCombo.toLowerCase()
-            || (configKey === '+' && keyCombo === '=')) {
+          if (matchesShortcut(e, configKey)) {
             // 截图只在视频播放页响应，避免拦截其他页面或输入法的按键。
             if (id === 'videoScreenshot'
               && (e.isComposing || !(isVideoPlaybackPage() || isVideoOrBangumiPage()))) {
@@ -491,47 +483,4 @@ function toggleFollow(): void {
   catch (error) {
     console.error('[BewlyCat] Error toggling follow:', error)
   }
-}
-
-// 快捷键按键组合生成函数
-// 生成标准化的按键组合字符串
-function generateKeyCombo(e: KeyboardEvent): string {
-  const parts: string[] = []
-
-  // 添加修饰键(顺序要与配置中的一致)
-  if (e.ctrlKey)
-    parts.push('Ctrl')
-  if (e.altKey)
-    parts.push('Alt')
-  if (e.shiftKey)
-    parts.push('Shift')
-
-  // 处理主按键
-  let mainKey = e.key
-  if (mainKey === ' ') {
-    mainKey = 'Space'
-  }
-  // 对于单字符按键转为大写
-  else if (mainKey.length === 1) {
-    mainKey = mainKey.toUpperCase()
-  }
-  // 特殊按键处理
-  else if (mainKey === 'ArrowUp') {
-    mainKey = '↑'
-  }
-  else if (mainKey === 'ArrowDown') {
-    mainKey = '↓'
-  }
-  else if (mainKey === 'ArrowLeft') {
-    mainKey = '←'
-  }
-  else if (mainKey === 'ArrowRight') {
-    mainKey = '→'
-  }
-
-  parts.push(mainKey)
-
-  // 返回标准化的按键组合
-  const combo = parts.join('+')
-  return combo
 }

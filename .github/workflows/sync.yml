@@ -2,13 +2,17 @@ name: Sync upstream and build Safari
 
 on:
   schedule:
-    # Every 6 hours at :15 UTC (Beijing: 02:15 / 08:15 / 14:15 / 20:15)
+    # 每 6 小时同步一次，北京时间为 02:15、08:15、14:15、20:15。
     - cron: '15 */6 * * *'
   workflow_dispatch:
 
 permissions:
   contents: write
   actions: write
+
+concurrency:
+  group: sync-upstream-main
+  cancel-in-progress: false
 
 jobs:
   sync:
@@ -21,10 +25,8 @@ jobs:
         with:
           ref: main
           fetch-depth: 0
-          # Default GITHUB_TOKEN cannot push changes that touch .github/workflows/*.
-          # If upstream modifies a workflow file, this step will fail on push.
-          # Create a classic PAT with `repo` + `workflow` scopes, save as repo
-          # secret `SYNC_TOKEN`, and it will be used instead.
+          # 上游修改工作流时，默认 GITHUB_TOKEN 无法推送这些修改。
+          # 可配置具有 repo 和 workflow 权限的经典 PAT 到 SYNC_TOKEN。
           token: ${{ secrets.SYNC_TOKEN || github.token }}
 
       - name: Configure git identity
@@ -53,7 +55,7 @@ jobs:
   build:
     name: Trigger Safari build
     needs: sync
-    if: needs.sync.outputs.updated == 'true'
+    if: needs.sync.outputs.updated == 'true' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

@@ -14,6 +14,7 @@ import { AppPage } from '~/enums/appEnums'
 import { settings } from '~/logic'
 import type { DockItem } from '~/stores/mainStore'
 import { useMainStore } from '~/stores/mainStore'
+import { isKeyboardInput, matchesShortcut } from '~/utils/keyboard'
 import { isHomePage, openLinkToNewTab } from '~/utils/main'
 
 import Tooltip from '../Tooltip.vue'
@@ -465,6 +466,9 @@ const dockTransformStyle = computed((): { transform: string, transformOrigin: st
 
 // 处理首页刷新快捷键
 function handleHomeRefreshKeydown(event: KeyboardEvent) {
+  if (settings.value.keyboard === false || event.isComposing || isKeyboardInput(event))
+    return
+
   // 检查快捷键设置是否启用
   const shortcutConfig = settings.value.shortcuts?.homeRefresh
   if (!shortcutConfig?.enabled) {
@@ -475,50 +479,7 @@ function handleHomeRefreshKeydown(event: KeyboardEvent) {
   const configuredKey = shortcutConfig.key || 'R'
 
   // 检查是否按下了配置的快捷键
-  if (event.key && event.key.toUpperCase() === configuredKey.toUpperCase() && !event.ctrlKey && !event.metaKey && !event.altKey) {
-    // 检查页面中是否有任何输入框处于焦点状态
-    const activeElement = document.activeElement
-
-    // 使用事件路径检查是否点击了输入框
-    const eventPath = event.composedPath ? event.composedPath() : (event as any).path || []
-    let hasInputFocus = false
-
-    // 检查事件路径中是否包含输入元素
-    for (const element of eventPath) {
-      if (element instanceof HTMLInputElement
-        || element instanceof HTMLTextAreaElement
-        || (element instanceof HTMLElement && element.contentEditable === 'true')) {
-        hasInputFocus = true
-        break
-      }
-    }
-
-    // 备用检查：查找页面中所有输入元素并检查焦点
-    if (!hasInputFocus) {
-      const allInputs = document.querySelectorAll('input, textarea, [contenteditable="true"]')
-
-      allInputs.forEach((input) => {
-        const inputElement = input as HTMLElement
-        if (inputElement === activeElement
-          || inputElement === document.activeElement
-          || inputElement.matches(':focus')) {
-          hasInputFocus = true
-        }
-      })
-    }
-
-    // 最后检查：直接检查activeElement
-    if (!hasInputFocus && activeElement) {
-      if (activeElement.tagName === 'INPUT'
-        || activeElement.tagName === 'TEXTAREA'
-        || (activeElement instanceof HTMLElement && activeElement.contentEditable === 'true')) {
-        hasInputFocus = true
-      }
-    }
-
-    if (hasInputFocus)
-      return
-
+  if (matchesShortcut(event, configuredKey)) {
     // 如果没有输入框获得焦点且显示刷新按钮，则触发刷新
     if (showBackToTopOrRefreshButton.value && canRefreshCurrentPage.value) {
       event.preventDefault()

@@ -1,6 +1,5 @@
 import browser from 'webextension-polyfill'
 
-import dnrRules from '../../assets/rules.json'
 import { isContentScriptTargetUrl } from '~/constants/contentScript'
 import { BILIBILI_DESKTOP_USER_AGENT, isBilibiliWwwUrl, isPreventMobileRedirectEnabled } from '~/utils/bilibiliDesktopNavigation'
 
@@ -8,34 +7,42 @@ import { setupContentScriptRefreshPrompt } from './contentScriptRefreshPrompt'
 import { setupLoginStateWatcher } from './loginStateWatcher'
 import { setupApiMsgListeners } from './messageListeners/api'
 import { setupTabMsgListeners } from './messageListeners/tabs'
+import { syncSafariHeaderRules } from './safariHeaderRules'
 import { setupSettingsCloudSync } from './settingsCloudSync'
 import { setupSettingsStorageCoordinator } from './settingsStorageCoordinator'
 import { setupTopBarStateBroker } from './topBarStateBroker'
 import { setupWatchLaterStateBroker } from './watchLaterStateBroker'
 import { initWbiKeys } from './wbiSign'
 
-// Initialize extension and set up message handlers
-browser.runtime.onInstalled.addListener(async () => {
-  console.log('Extension installed')
+// eslint-disable-next-line node/prefer-global/process
+const isSafariBuild = Boolean(process.env.SAFARI)
+let safariHeaderRulesQueue = Promise.resolve()
 
-  // Safari (WebKit) segfaults when loading static declarative_net_request rules,
-  // so the static ruleset is omitted from the manifest for Safari (see manifest.ts).
-  // Inject the exact same rules dynamically here instead — dynamic rules persist
-  // across restarts, so applying them once on install/update is sufficient.
-  // eslint-disable-next-line node/prefer-global/process
-  if (process.env.SAFARI) {
+function restoreSafariHeaderRules(force = false) {
+  safariHeaderRulesQueue = safariHeaderRulesQueue.then(async () => {
     try {
-      await browser.declarativeNetRequest.updateDynamicRules({
-        removeRuleIds: dnrRules.map(rule => rule.id),
-        addRules: dnrRules as browser.DeclarativeNetRequest.Rule[],
-      })
-      console.log('[BewlyCat] Safari dynamic DNR rules injected')
+      await syncSafariHeaderRules(browser.declarativeNetRequest, force)
     }
     catch (error) {
-      console.error('[BewlyCat] Failed to inject Safari DNR rules:', error)
+      console.error('[BewlyCat] Failed to sync Safari DNR rules:', error)
     }
-  }
+  })
+  return safariHeaderRulesQueue
+}
+
+// 安装和更新时强制刷新规则；后台重启时恢复缺失或失效的规则。
+browser.runtime.onInstalled.addListener(async () => {
+  console.log('Extension installed')
+  if (isSafariBuild)
+    await restoreSafariHeaderRules(true)
 })
+
+if (isSafariBuild) {
+  void restoreSafariHeaderRules()
+  browser.permissions.onAdded.addListener(() => {
+    void restoreSafariHeaderRules()
+  })
+}
 
 const PREVENT_MOBILE_REDIRECT_RULE_ID = 1001
 const preventMobileRedirectRule: browser.DeclarativeNetRequest.Rule = {

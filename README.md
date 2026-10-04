@@ -1,5 +1,7 @@
 # BewlyCat
 
+此 fork 在 [keleus/BewlyCat](https://github.com/keleus/BewlyCat) 的基础上维护 macOS Safari 适配，同时保留 Chrome、Edge 和 Firefox 构建。
+
 ![GitHub Release](https://img.shields.io/github/v/release/keleus/BewlyCat?label=Github) ![Chrome Web Store Version](https://img.shields.io/chrome-web-store/v/oopkfefbgecikmfbbapnlpjidoomhjpl?label=Chrome) ![Edge Addons Version](https://img.shields.io/badge/dynamic/json?color=blue&label=Edge&query=%24.version&url=https%3A%2F%2Fmicrosoftedge.microsoft.com%2Faddons%2Fgetproductdetailsbycrxid%2Faaammfjdfifgnfnbflolojihjfhdploj&prefix=v) ![Firefox Version](https://img.shields.io/amo/v/bewlycat?label=Firefox)
 
 ![Github Downloads](https://img.shields.io/github/downloads/keleus/BewlyCat/total?label=Github%20Downloads) ![Chrome Web Store Users](https://img.shields.io/chrome-web-store/users/oopkfefbgecikmfbbapnlpjidoomhjpl?label=Chrome%20Users) ![Edge Addons Users](https://img.shields.io/badge/dynamic/json?label=Edge%20Users&query=%24.activeInstallCount&url=https%3A%2F%2Fmicrosoftedge.microsoft.com%2Faddons%2Fgetproductdetailsbycrxid%2Faaammfjdfifgnfnbflolojihjfhdploj) ![Firefox Users](https://img.shields.io/amo/users/bewlycat?label=Firefox%20Users)
@@ -21,7 +23,7 @@
 >
 > 浏览器拓展商店上架均同时提交审核，实际更新速度取决于各个商店审核速度。请勿在issue中催促审核，商店异常行为由商店导致！
 >
-> 不会打包safari，也不会在项目里做大量的safari only适配，如果有需要欢迎自行打包。
+> 上游不提供 Safari 打包；此 fork 提供 Safari 开发测试包，安装和本地构建方法见下文。
 >
 > 本项目由MIT许可在原项目基础上开发，并亦与原作者联系取得了授权，包括上架Chrome应用商店等权利。
 
@@ -70,6 +72,37 @@
 > 审核可能存在延迟，Chrome一般会晚30分钟-15天，Edge一般会晚3-30天，Firefox一般会晚1-30分钟
 
 ### 本地安装
+
+#### macOS Safari
+
+要求 Safari 26 或更新版本。扩展使用的请求方法过滤规则需要 Safari 26；Safari 版本支持情况见 [MDN 兼容表](https://developer.mozilla.org/en-US/docs/Mozilla/Add-ons/WebExtensions/API/declarativeNetRequest/RuleCondition#browser_compatibility)。
+
+1. 在此 fork 的 [Releases](https://github.com/FfmpegZZZ/BewlyCat/releases) 或 [Build Release 工作流](https://github.com/FfmpegZZZ/BewlyCat/actions/workflows/release.yml) 下载 `BewlyCat-safari-macos.zip`。Actions 的 artifact 解压后还需要解压其中的应用压缩包。
+2. 将解压后的 `BewlyCat.app` 移到“应用程序”并打开。当前包使用本地临时签名，未经过 Apple 公证；macOS 首次打开可能需要在“系统设置 → 隐私与安全性”中允许打开。
+3. 在 Safari 设置的“高级”中开启开发者功能，然后在“开发”菜单中开启“允许未签名的扩展”。退出 Safari 后需重新开启该选项，详见 [Apple 开发文档](https://developer.apple.com/documentation/safariservices/building-a-safari-app-extension)。
+4. 在“Safari → 设置 → 扩展”中启用 BewlyCat，并允许它访问 `bilibili.com` 和 `hdslb.com`，随后刷新 B 站页面。
+
+包同时包含 Apple Silicon 和 Intel 架构。正式分发需要自己的 Apple Developer 签名和公证，详见 [Safari 扩展分发文档](https://developer.apple.com/documentation/safariservices/distributing-your-safari-web-extension)。
+
+#### 本地构建 Safari
+
+安装 Node.js、与 `package.json` 中 `packageManager` 对应的 pnpm，以及完整的 Xcode（仅 Command Line Tools 不够）。首次运行 Xcode 并完成初始化，然后执行：
+
+```bash
+pnpm install --frozen-lockfile
+pnpm build-safari
+pnpm convert-safari
+```
+
+网页扩展资源生成在 `extension-safari/`，转换后的 Xcode 项目位于 `extension-safari-macos/`。在 Xcode 中选择 macOS 方案和签名团队后运行。若 `xcrun` 找不到转换工具，先选择完整 Xcode：
+
+```bash
+sudo xcode-select --switch /Applications/Xcode.app/Contents/Developer
+```
+
+#### 同步上游
+
+此 fork 的 [同步工作流](https://github.com/FfmpegZZZ/BewlyCat/actions/workflows/sync.yml) 每六小时合并上游 `main`，更新后触发 Safari 构建。手动运行也可补建已同步的代码。遇到合并冲突时需先人工解决；若上游修改了工作流文件，需配置具有 `repo` 和 `workflow` 权限的 `SYNC_TOKEN` 仓库密钥。
 
 [CI](https://github.com/keleus/BewlyCat/actions)：使用最新代码自动构建
 

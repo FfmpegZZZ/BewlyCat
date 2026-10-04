@@ -309,10 +309,6 @@ export function setupContentScriptRefreshPrompt(): void {
   refreshPromptListenersInitialized = true
   setupRefreshAllTabsListener()
 
-  // eslint-disable-next-line node/prefer-global/process
-  if (process.env.SAFARI)
-    return
-
   browser.tabs.onActivated.addListener(({ tabId }) => {
     queueContentScriptRefreshPrompt(tabId)
   })

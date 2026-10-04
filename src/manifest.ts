@@ -38,9 +38,9 @@ export async function getManifest() {
     },
     permissions: [
       'storage',
-      'declarativeNetRequest',
+      isSafari ? 'declarativeNetRequestWithHostAccess' : 'declarativeNetRequest',
       'cookies',
-      ...(!isSafari ? ['scripting'] : []),
+      'scripting',
       ...isFirefox
         ? ['webRequest', 'webRequestBlocking']
         : [],
@@ -88,9 +88,7 @@ export async function getManifest() {
             ? `script-src 'self' http://localhost:${port}; object-src 'self' http://localhost:${port}`
             : 'script-src \'self\'; object-src \'self\'',
         },
-    // Safari (WebKit) crashes while parsing static declarative_net_request rules
-    // at extension load time. Skip the static ruleset for Safari and inject the
-    // same rules dynamically from the background script instead.
+    // Safari 加载静态规则时可能崩溃，改由后台同步持久化动态规则。
     ...(isFirefox || isSafari)
       ? {}
       : {
@@ -115,6 +113,13 @@ export async function getManifest() {
         id: 'addon@celeus.cn',
       },
     }
+  }
+
+  if (isSafari) {
+    // requestMethods 条件从 Safari 26 起支持，避免旧版本扩大规则匹配范围。
+    manifest.browser_specific_settings = {
+      safari: { strict_min_version: '26.0' },
+    } as Manifest.BrowserSpecificSettings & { safari: { strict_min_version: string } }
   }
 
   return manifest
