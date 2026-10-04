@@ -1,7 +1,36 @@
 import type { API_COLLECTION } from '~/background/messageListeners/api'
+import { isSearchResultApiMethod } from '~/constants/searchApi'
 import { settings } from '~/logic'
-import { sendMessage } from '~/utils/messaging'
-import { isPageNoCookieSearchMethod, requestPageNoCookieSearch } from '~/utils/pageNoCookieSearch'
+import { sendAbortableApiMessage, sendMessage } from '~/utils/messaging'
+
+export interface ApiRequestOptions {
+  signal?: AbortSignal
+}
+
+const SEARCH_QUERY_ID_CHARACTERS = '0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ'
+const searchQueryIds = new Map<string, string>()
+
+function createSearchQueryId(): string {
+  return Array.from({ length: 32 }, () => {
+    const index = Math.floor(Math.random() * SEARCH_QUERY_ID_CHARACTERS.length)
+    return SEARCH_QUERY_ID_CHARACTERS[index]
+  }).join('')
+}
+
+function getSearchQueryId(method: string, options?: object): string {
+  const keyword = String((options as Record<string, unknown> | undefined)?.keyword ?? '')
+  const cacheKey = `${method}:${keyword}`
+  const cached = searchQueryIds.get(cacheKey)
+  if (cached)
+    return cached
+
+  if (searchQueryIds.size >= 100)
+    searchQueryIds.clear()
+
+  const id = createSearchQueryId()
+  searchQueryIds.set(cacheKey, id)
+  return id
+}
 
 type CamelCase<S extends string> = S extends `${infer P1}_${infer P2}${infer P3}`
   ? `${Lowercase<P1>}${Uppercase<P2>}${CamelCase<P3>}`
@@ -10,7 +39,7 @@ type CamelCase<S extends string> = S extends `${infer P1}_${infer P2}${infer P3}
 type APIFunction<T = typeof API_COLLECTION> = {
   [K in keyof T as CamelCase<string & K>]: {
     // @ts-expect-error allow params
-    [P in keyof T[K]]: T[K][P] extends (...args: any[]) => any ? T[K][P] : Lowercase<T[K][P]['_fetch']['method']> extends 'get' ? (options?: Partial<T[K][P]['params']>) => Promise<any> : (options?: Partial<T[K][P]['params'] & T[K][P]['_fetch']['body']>) => Promise<any>
+    [P in keyof T[K]]: T[K][P] extends (...args: any[]) => any ? T[K][P] : Lowercase<T[K][P]['_fetch']['method']> extends 'get' ? (options?: Partial<T[K][P]['params']>, request?: ApiRequestOptions) => Promise<any> : (options?: Partial<T[K][P]['params'] & T[K][P]['_fetch']['body']>) => Promise<any>
   }
 }
 
@@ -33,22 +62,26 @@ export class APIClient {
         else {
           const api = new Proxy({}, {
             get(_, p) {
-              return (options?: object) => {
-                if (
-                  namespace === 'search'
+              return (options?: object, request?: ApiRequestOptions) => {
+                const isSearchResultRequest = namespace === 'search'
                   && typeof p === 'string'
-                  && settings.value.depersonalizeSearchResults
-                  && isPageNoCookieSearchMethod(p)
-                ) {
-                  return requestPageNoCookieSearch(p, options as Record<string, unknown> | undefined)
-                }
+                  && isSearchResultApiMethod(p)
+                const requestOptions = isSearchResultRequest
+                  ? { qv_id: getSearchQueryId(p, options), ...options }
+                  : options
 
                 const message: Record<string, any> = {
                   contentScriptQuery: p as string,
-                  ...options,
+                  ...requestOptions,
                 }
 
-                return sendMessage(p as string, message)
+                // 去个性化搜索仍经后台获取匿名 WBI key 并签名，只省略 Cookie。
+                if (isSearchResultRequest && settings.value.depersonalizeSearchResults)
+                  message.bewlyNoCookie = true
+
+                return request?.signal
+                  ? sendAbortableApiMessage(p as string, message, request.signal)
+                  : sendMessage(p as string, message)
               }
             },
           })

@@ -1,32 +1,164 @@
 <script lang="ts" setup>
+import { useI18n } from 'vue-i18n'
+
 import Radio from '~/components/Radio.vue'
+import Select from '~/components/Select.vue'
+import Slider from '~/components/Slider.vue'
 import { settings } from '~/logic'
+import type { CommentReplyPaginationMode, CommentReplyTreeMode } from '~/logic/storage'
+import { COMMENT_REPLY_TREE_CONTAINER_MAX_HEIGHT, COMMENT_REPLY_TREE_CONTAINER_MIN_HEIGHT } from '~/logic/storage'
 
 import SettingsItem from '../../components/SettingsItem.vue'
 import SettingsItemGroup from '../../components/SettingsItemGroup.vue'
+import SettingsToggleTag from '../../components/SettingsToggleTag.vue'
+
+const { t } = useI18n()
+
+type CommentToggleSetting
+  = | 'showIPLocation'
+    | 'showSex'
+    | 'showCommentHostTag'
+
+interface CommentToggleOption {
+  setting: CommentToggleSetting
+  label: string
+  description: string
+  icon: string
+}
+
+const commentToggleOptions = computed<CommentToggleOption[]>(() => [
+  { setting: 'showIPLocation', label: t('settings.show_ip_location'), description: t('settings.show_ip_location_desc'), icon: 'i-tabler-map-pin' },
+  { setting: 'showSex', label: t('settings.show_sex'), description: t('settings.show_sex_desc'), icon: 'i-tabler-gender-bigender' },
+  { setting: 'showCommentHostTag', label: t('settings.show_comment_host_tag'), description: t('settings.show_comment_host_tag_desc'), icon: 'i-tabler-user-star' },
+])
+
+const commentReplyTreeModeOptions = computed<{ label: string, value: CommentReplyTreeMode }[]>(() => [
+  {
+    label: t('settings.comment_reply_tree_mode.line_collapse_main'),
+    value: 'lineCollapseMain',
+  },
+  {
+    label: t('settings.comment_reply_tree_mode.line_keep_main'),
+    value: 'lineKeepMain',
+  },
+  {
+    label: t('settings.comment_reply_tree_mode.indent_only'),
+    value: 'indentOnly',
+  },
+])
+
+const commentReplyPaginationModeOptions = computed<{ label: string, value: CommentReplyPaginationMode }[]>(() => [
+  {
+    label: t('settings.comment_reply_pagination_mode.load_more'),
+    value: 'loadMore',
+  },
+  {
+    label: t('settings.comment_reply_pagination_mode.pagination'),
+    value: 'pagination',
+  },
+])
 </script>
 
 <template>
-  <div>
-    <SettingsItemGroup :title="$t('settings.group_comments')">
-      <SettingsItem :title="$t('settings.show_ip_location')" :desc="$t('settings.show_ip_location_desc')" right-width="auto">
-        <Radio v-model="settings.showIPLocation" />
-      </SettingsItem>
+  <SettingsItemGroup :title="$t('settings.group_comments')">
+    <div class="comment-setting-tags" role="group" :aria-label="$t('settings.group_comments')">
+      <SettingsToggleTag
+        v-for="option in commentToggleOptions"
+        :key="option.setting"
+        v-model="settings[option.setting]"
+        :label="option.label"
+        :description="option.description"
+        :icon="option.icon"
+        :show-state-icon="false"
+      />
+    </div>
 
-      <SettingsItem :title="$t('settings.show_sex')" :desc="$t('settings.show_sex_desc')" right-width="auto">
-        <Radio v-model="settings.showSex" />
-      </SettingsItem>
+    <SettingsItem
+      :title="$t('settings.enable_comment_reply_tree_display')"
+      :desc="$t('settings.enable_comment_reply_tree_display_desc')"
+      right-width="auto"
+    >
+      <Radio v-model="settings.enableCommentReplyTreeDisplay" />
+    </SettingsItem>
 
-      <SettingsItem :title="$t('settings.show_comment_host_tag')" :desc="$t('settings.show_comment_host_tag_desc')" right-width="auto">
-        <Radio v-model="settings.showCommentHostTag" />
-      </SettingsItem>
+    <SettingsItem
+      v-if="settings.enableCommentReplyTreeDisplay"
+      :title="$t('settings.enable_comment_reply_tree_container')"
+      :desc="$t('settings.enable_comment_reply_tree_container_desc')"
+      right-width="auto"
+    >
+      <Radio v-model="settings.enableCommentReplyTreeContainer" />
+    </SettingsItem>
 
-      <SettingsItem :title="$t('settings.adjust_comment_image_height')" :desc="$t('settings.adjust_comment_image_height_desc')" right-width="auto">
-        <Radio v-model="settings.adjustCommentImageHeight" />
-      </SettingsItem>
-    </SettingsItemGroup>
-  </div>
+    <SettingsItem
+      v-if="settings.enableCommentReplyTreeDisplay && settings.enableCommentReplyTreeContainer"
+      :title="$t('settings.comment_reply_tree_container_height')"
+      :desc="$t('settings.comment_reply_tree_container_height_desc')"
+      right-width="auto"
+    >
+      <div class="slider-control">
+        <Slider
+          v-model="settings.commentReplyTreeContainerHeight"
+          :min="COMMENT_REPLY_TREE_CONTAINER_MIN_HEIGHT"
+          :max="COMMENT_REPLY_TREE_CONTAINER_MAX_HEIGHT"
+          :label="`${settings.commentReplyTreeContainerHeight}px`"
+        />
+      </div>
+    </SettingsItem>
+
+    <SettingsItem
+      v-if="settings.enableCommentReplyTreeDisplay"
+      :title="$t('settings.comment_reply_tree_mode.title')"
+      :desc="$t('settings.comment_reply_tree_mode.desc')"
+      right-width="auto"
+    >
+      <Select
+        v-model="settings.commentReplyTreeMode"
+        :options="commentReplyTreeModeOptions"
+        w="220px"
+      />
+    </SettingsItem>
+
+    <SettingsItem
+      v-if="settings.enableCommentReplyTreeDisplay"
+      :title="$t('settings.comment_reply_pagination_mode.title')"
+      :desc="$t('settings.comment_reply_pagination_mode.desc')"
+      right-width="auto"
+    >
+      <Select
+        v-model="settings.commentReplyPaginationMode"
+        :options="commentReplyPaginationModeOptions"
+        w="220px"
+      />
+    </SettingsItem>
+
+    <SettingsItem
+      :title="$t('settings.adjust_comment_image_height')"
+      :desc="$t('settings.adjust_comment_image_height_desc')"
+      right-width="auto"
+    >
+      <Radio v-model="settings.adjustCommentImageHeight" />
+    </SettingsItem>
+
+    <SettingsItem
+      :title="$t('settings.hide_comment_image_scrollbar')"
+      :desc="$t('settings.hide_comment_image_scrollbar_desc')"
+      right-width="auto"
+    >
+      <Radio v-model="settings.hideCommentImageScrollbar" />
+    </SettingsItem>
+  </SettingsItemGroup>
 </template>
 
 <style lang="scss" scoped>
+.comment-setting-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 1rem 0;
+}
+
+.slider-control {
+  width: 220px;
+}
 </style>

@@ -7,6 +7,7 @@ import SmoothLoading from '~/components/SmoothLoading.vue'
 import UserCard from '~/components/UserCard/UserCard.vue'
 import VideoCardGrid from '~/components/VideoCardGrid.vue'
 import { useBewlyApp } from '~/composables/useAppProvider'
+import { SEARCH_PAGE_SIZES } from '~/constants/searchApi'
 import type { GridLayoutType } from '~/logic'
 import { settings } from '~/logic'
 import api from '~/utils/api'
@@ -45,6 +46,7 @@ const {
   userRelations,
   batchQueryUserRelations,
   updateUserRelation,
+  reset: resetUserRelations,
 } = useUserRelations()
 
 // 搜索请求管理
@@ -109,7 +111,7 @@ const gridLayout: GridLayoutType = 'adaptive'
 
 // 转换后的直播间列表
 const transformedLiveRoomList = computed(() => {
-  return liveRoomList.value.map(live => convertLiveRoomData(live))
+  return liveRoomList.value.map((live: any) => convertLiveRoomData(live))
 })
 
 // 检查是否在翻页模式下且不在第一页
@@ -221,11 +223,11 @@ async function performSearch(loadMore: boolean): Promise<boolean> {
     // 仅搜索直播间
     success = await search(
       keyword,
-      params => api.search.searchLiveRoom(params),
+      (params, request) => api.search.searchLiveRoom(params, request),
       {
         page: targetPage,
-        pagesize: 30,
-        order: props.filters.roomOrder,
+        page_size: SEARCH_PAGE_SIZES.live,
+        order: props.filters.roomOrder || 'online',
       },
     )
   }
@@ -233,11 +235,11 @@ async function performSearch(loadMore: boolean): Promise<boolean> {
     // 仅搜索主播
     success = await search(
       keyword,
-      params => api.search.searchLiveUser(params),
+      (params, request) => api.search.searchLiveUser(params, request),
       {
         page: targetPage,
-        page_size: 30,
-        order: props.filters.userOrder,
+        page_size: SEARCH_PAGE_SIZES.live,
+        order: props.filters.userOrder || 'online',
       },
     )
   }
@@ -245,11 +247,11 @@ async function performSearch(loadMore: boolean): Promise<boolean> {
     // 全部（默认使用live类型，包含直播间和主播）
     success = await search(
       keyword,
-      params => api.search.searchLive(params),
+      (params, request) => api.search.searchLive(params, request),
       {
         page: targetPage,
-        pagesize: 30,
-        order: props.filters.roomOrder,
+        page_size: SEARCH_PAGE_SIZES.live,
+        order: props.filters.roomOrder || 'online',
       },
     )
   }
@@ -288,6 +290,7 @@ async function performSearch(loadMore: boolean): Promise<boolean> {
     liveUserTotalResults.value = totalResults.value
   }
   else if (props.filters.subCategory === 'live_room') {
+    resetUserRelations()
     // 直播间搜索：尝试嵌套结构和扁平结构
     const incomingList = Array.isArray(rawData?.result?.live_room)
       ? rawData.result.live_room
@@ -355,7 +358,7 @@ async function performSearch(loadMore: boolean): Promise<boolean> {
     extractPagination({
       total: liveRoomTotal,
       numResults: liveRoomTotal,
-      pagesize: rawData?.pagesize || 30,
+      pagesize: rawData?.pagesize || SEARCH_PAGE_SIZES.live,
       pageinfo: rawData?.pageinfo?.live_room,
     }, incomingRooms.length)
   }
@@ -409,11 +412,11 @@ async function handlePageChange(page: number) {
     // 仅搜索直播间
     success = await search(
       keyword,
-      params => api.search.searchLiveRoom(params),
+      (params, request) => api.search.searchLiveRoom(params, request),
       {
         page,
-        pagesize: 30,
-        order: props.filters.roomOrder,
+        page_size: SEARCH_PAGE_SIZES.live,
+        order: props.filters.roomOrder || 'online',
       },
     )
   }
@@ -421,11 +424,11 @@ async function handlePageChange(page: number) {
     // 仅搜索主播
     success = await search(
       keyword,
-      params => api.search.searchLiveUser(params),
+      (params, request) => api.search.searchLiveUser(params, request),
       {
         page,
-        page_size: 30,
-        order: props.filters.userOrder,
+        page_size: SEARCH_PAGE_SIZES.live,
+        order: props.filters.userOrder || 'online',
       },
     )
   }
@@ -433,17 +436,19 @@ async function handlePageChange(page: number) {
     // 全部（默认使用live类型，包含直播间和主播）
     success = await search(
       keyword,
-      params => api.search.searchLive(params),
+      (params, request) => api.search.searchLive(params, request),
       {
         page,
-        pagesize: 30,
-        order: props.filters.roomOrder,
+        page_size: SEARCH_PAGE_SIZES.live,
+        order: props.filters.roomOrder || 'online',
       },
     )
   }
 
-  if (!success || !lastResponse.value?.data)
+  if (!success || !lastResponse.value?.data) {
+    isPageChanging.value = false
     return
+  }
 
   const rawData = lastResponse.value.data
 
@@ -471,6 +476,7 @@ async function handlePageChange(page: number) {
     liveUserTotalResults.value = totalResults.value
   }
   else if (props.filters.subCategory === 'live_room') {
+    resetUserRelations()
     // 直播间搜索：尝试嵌套结构和扁平结构
     const incomingList = Array.isArray(rawData?.result?.live_room)
       ? rawData.result.live_room
@@ -522,7 +528,7 @@ async function handlePageChange(page: number) {
     extractPagination({
       total: liveRoomTotal,
       numResults: liveRoomTotal,
-      pagesize: rawData?.pagesize || 30,
+      pagesize: rawData?.pagesize || SEARCH_PAGE_SIZES.live,
       pageinfo: rawData?.pageinfo?.live_room,
     }, incomingRooms.length)
   }
@@ -548,8 +554,8 @@ async function refreshLiveRoomsOnly() {
     const response = await api.search.searchLive({
       keyword,
       page: 1,
-      pagesize: 30,
-      order: props.filters.roomOrder,
+      page_size: SEARCH_PAGE_SIZES.live,
+      order: props.filters.roomOrder || 'online',
     })
 
     if (!response || response.code !== 0)
@@ -585,6 +591,7 @@ async function refreshLiveRoomsOnly() {
 }
 
 function resetAll() {
+  resetUserRelations()
   resetSearch()
   resetPagination()
   resetLoadMore()
@@ -650,11 +657,11 @@ defineExpose({
             && (filters.subCategory === 'all' || filters.subCategory === 'live_user')"
         >
           <div flex items-center gap-3 mb-3>
-            <h3 text="lg $bew-text-1" font-medium>
-              主播
+            <h3 class="bew-section-heading" text="$bew-text-1">
+              {{ t('search.streamers') }}
             </h3>
             <span text="sm $bew-text-3">
-              共找到{{ formatResultCount(filters.subCategory === 'live_user' ? totalResults : (liveUserTotalResults || liveUserList.length)) }}个结果
+              {{ t('search.results_count', { count: formatResultCount(filters.subCategory === 'live_user' ? totalResults : (liveUserTotalResults || liveUserList.length)) }) }}
             </span>
           </div>
           <div grid="~ cols-3 gap-4">
@@ -681,10 +688,10 @@ defineExpose({
               px-6 py-2 rounded="$bew-radius-half"
               bg="$bew-fill-1 hover:$bew-fill-2"
               text="sm $bew-text-1"
-              transition-all
+              transition-colors duration-200
               @click="handleSwitchToLiveUser"
             >
-              查看更多主播 ({{ Math.max((liveUserTotalResults || 0) - 6, 0) }}+)
+              {{ t('search.view_more_streamers', { count: Math.max((liveUserTotalResults || 0) - 6, 0) }) }}
             </button>
           </div>
         </div>
@@ -692,11 +699,11 @@ defineExpose({
         <!-- 直播间 (下面) - 始终渲染 VideoCardGrid 以支持骨架屏和空状态 -->
         <div v-if="filters.subCategory === 'all' || filters.subCategory === 'live_room'">
           <div v-if="liveRoomList.length > 0" flex items-center gap-3 mb-3>
-            <h3 text="lg $bew-text-1" font-medium>
-              直播间
+            <h3 class="bew-section-heading" text="$bew-text-1">
+              {{ t('search.live_rooms') }}
             </h3>
             <span text="sm $bew-text-3">
-              共找到{{ formatResultCount(filters.subCategory === 'live_room' ? totalResults : (liveRoomTotalResults || liveRoomList.length)) }}个结果
+              {{ t('search.results_count', { count: formatResultCount(filters.subCategory === 'live_room' ? totalResults : (liveRoomTotalResults || liveRoomList.length)) }) }}
             </span>
           </div>
           <VideoCardGrid

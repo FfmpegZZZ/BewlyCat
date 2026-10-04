@@ -1,43 +1,122 @@
-.homePage .bili-header > .bili-header__channel,
-.homePage .bili-header > .bewly-bili-channel-panel {
+// portal 保留在 body 时，停用适配也不能露出原站 Banner 或其他首页内容。
+.homePage.bewly-custom-homepage > body > .bili-header > :not(.bili-header__bar):not(.bewly-bili-channel-panel) {
   display: none !important;
 }
 
-.homePage .header-channel {
+.homePage.bewly-custom-homepage .bili-header > .bili-header__channel,
+.homePage.bewly-custom-homepage .bili-header > .bewly-bili-channel-panel {
   display: none !important;
 }
 
-.homePage .header-channel.bewly-original-fixed-channel-visible {
-  display: flex !important;
-  top: var(--bew-top-bar-height) !important;
+.homePage.bewly-custom-homepage .header-channel {
+  display: none !important;
 }
 
-.homePage .bili-header {
+.homePage.bewly-custom-homepage .bili-header {
   .bewly-bili-logo-entry,
   .bewly-home-entry-arrow {
     display: none;
   }
 }
 
-.homePage:not(.remove-top-bar) .bili-header.bewly-original-top-bar-scrolled > .bili-header__bar {
+// 自定义首页的 portal 与 fixed 插件根节点显式排序，避免依赖 auto 层级。
+// Pop 的层级只在原版顶栏内部生效；外层仍低于插件设置窗口。
+.homePage.bewly-custom-homepage:not(.remove-top-bar) > body > .bili-header {
+  z-index: var(--bew-z-original-top-bar, 1002);
+
+  > .bili-header__bar {
+    z-index: var(--bew-z-original-top-bar, 1002);
+
+    .v-popover {
+      z-index: var(--bew-z-original-top-bar-popover, 1);
+    }
+
+    .search-panel {
+      // 原站使用 top: 100%；relative 会让面板撑高搜索栏并随居中布局移到视口上方。
+      position: absolute;
+      z-index: var(--bew-z-original-top-bar-popover, 1);
+    }
+  }
+}
+
+// 自定义首页没有原生 Banner，首屏和滚动后的底色、入口文字必须成对设置。
+// B 站可能重新移除 slide-down，不能依赖它维持白底上的深色文字。
+.homePage.bewly-custom-homepage:not(.remove-top-bar) .bili-header > .bili-header__bar {
   display: flex !important;
   visibility: visible !important;
   opacity: 1 !important;
-  background-color: #fff !important;
+  background-color: var(--bew-elevated-solid) !important;
+  color: var(--bew-text-1);
   backdrop-filter: none;
+
+  // 新版顶栏使用 div 包装入口，且 slide-down 不再控制入口颜色。
+  // 保留下面的旧版选择器，兼容仍使用 li / right-entry__outside 的页面。
+  :is(.left-entry__item-trigger, .right-entry__item-trigger) {
+    color: var(--bew-text-1) !important;
+
+    // 首页小电视有独立的白色声明，不能只依赖入口颜色的继承。
+    .trigger-icon {
+      color: inherit !important;
+    }
+  }
+
+  .home-page-entry > .left-entry__item-trigger > .trigger-icon {
+    color: var(--bew-theme-color) !important;
+  }
+
+  // 仅覆盖栏体入口，不把投稿按钮、会员标识及 Pop 内的强调色一起改掉。
+  > .left-entry > li > :is(a, .default-entry, .entry-title),
+  > .left-entry > li > .entry-title > .mini-header__title,
+  > .left-entry > .mini-header__logo,
+  > .left-entry > .download-entry > .download-entry__title,
+  > .right-entry > .right-entry-item > .right-entry__outside {
+    color: var(--bew-text-1) !important;
+  }
+
+  > .right-entry > .right-entry-item > .right-entry__outside > :is(.right-entry-icon, .right-entry-text) {
+    color: var(--bew-text-1) !important;
+  }
 }
 
-.homePage:not(.remove-top-bar) .bili-header.bewly-original-top-bar-scrolled {
+// 自定义首页原版顶栏：首屏与滚动后都显示 B 站自己的宽 Logo（与插件 Logo 设置无关）
+.homePage.bewly-custom-homepage:not(.remove-top-bar) .bili-header {
+  .bewly-bili-logo-entry {
+    display: flex;
+    align-items: center;
+    margin-right: 16px;
+
+    a {
+      display: flex;
+      align-items: center;
+      height: var(--bew-top-bar-height);
+    }
+
+    img {
+      display: block;
+      // 接近 B 站原生 slide-down 宽标比例
+      width: 88px;
+      max-height: 42px;
+      height: auto;
+      object-fit: contain;
+    }
+  }
+
+  .entry-title {
+    gap: 8px;
+    margin-right: var(--bew-space-4);
+
+    .zhuzhan-icon {
+      display: none;
+    }
+  }
+}
+
+.homePage.bewly-custom-homepage:not(.remove-top-bar) .bili-header.bewly-original-top-bar-scrolled {
   display: block !important;
   visibility: visible !important;
   opacity: 1 !important;
-}
 
-.dark.homePage:not(.remove-top-bar) .bili-header.bewly-original-top-bar-scrolled > .bili-header__bar {
-  background-color: rgb(36 38 40) !important;
-}
-
-.homePage:not(.remove-top-bar) .bili-header.bewly-original-top-bar-scrolled {
+  // 自定义首页滚动态：同样显示宽 Logo
   .bewly-bili-logo-entry {
     display: flex;
     align-items: center;
@@ -53,13 +132,14 @@
       display: block;
       width: 88px;
       max-height: 42px;
+      height: auto;
       object-fit: contain;
     }
   }
 
   .entry-title {
     gap: 8px;
-    margin-right: 15px;
+    margin-right: var(--bew-space-4);
 
     .zhuzhan-icon {
       display: none;
@@ -89,26 +169,26 @@
   }
 }
 
-.homePage:not(.remove-top-bar)
+.homePage.bewly-custom-homepage:not(.remove-top-bar)
   .bili-header.bewly-original-top-bar-scrolled
   .v-popover:is(.bewly-original-native-channel-open, .bewly-original-native-channel-closing) {
   display: block !important;
 }
 
-.homePage:not(.remove-top-bar)
+.homePage.bewly-custom-homepage:not(.remove-top-bar)
   .bili-header.bewly-original-top-bar-scrolled
   .v-popover.bewly-original-native-channel-open {
   animation: bewly-bili-channel-panel-enter 0.3s;
 }
 
-.homePage:not(.remove-top-bar)
+.homePage.bewly-custom-homepage:not(.remove-top-bar)
   .bili-header.bewly-original-top-bar-scrolled
   .v-popover.bewly-original-native-channel-closing {
   animation: bewly-bili-channel-panel-leave 0.3s forwards;
   pointer-events: none;
 }
 
-.homePage:not(.remove-top-bar)
+.homePage.bewly-custom-homepage:not(.remove-top-bar)
   .bili-header.bewly-original-top-bar-scrolled:is(.bewly-original-channel-open, .bewly-original-channel-closing) {
   > .bewly-bili-channel-panel {
     display: flex !important;
@@ -126,13 +206,15 @@
   }
 }
 
-.homePage:not(.remove-top-bar) .bili-header.bewly-original-top-bar-scrolled.bewly-original-channel-open {
+.homePage.bewly-custom-homepage:not(.remove-top-bar)
+  .bili-header.bewly-original-top-bar-scrolled.bewly-original-channel-open {
   > .bewly-bili-channel-panel {
     animation: bewly-bili-channel-panel-enter 0.3s;
   }
 }
 
-.homePage:not(.remove-top-bar) .bili-header.bewly-original-top-bar-scrolled.bewly-original-channel-closing {
+.homePage.bewly-custom-homepage:not(.remove-top-bar)
+  .bili-header.bewly-original-top-bar-scrolled.bewly-original-channel-closing {
   > .bewly-bili-channel-panel {
     animation: bewly-bili-channel-panel-leave 0.3s forwards;
     pointer-events: none;
@@ -173,13 +255,13 @@
     align-items: center;
     box-sizing: border-box;
     height: 32px;
-    margin: 3px 0;
-    padding: 6px;
-    border-radius: 4px;
+    margin: var(--bew-space-1) 0;
+    padding: var(--bew-space-1);
+    border-radius: var(--bew-interactive-radius);
     color: var(--bew-text-1);
-    font-size: 14px;
-    font-weight: 400;
-    line-height: 20px;
+    font-size: var(--bew-font-size-body);
+    font-weight: var(--bew-font-weight-regular);
+    line-height: var(--bew-line-height-body);
     white-space: nowrap;
 
     &:hover {
@@ -192,16 +274,40 @@
     width: 24px;
     height: 24px;
     flex: none;
-    margin-right: 10px;
+    margin-right: var(--bew-space-3);
+  }
+}
+
+// 原版 B 站顶栏复用 BewlyCat 的视频页显示策略。只移动实际固定栏体，保留
+// #biliMainHeader 的页面占位，避免显示/隐藏时正文发生纵向跳动。
+.bewly-original-video-top-bar-controlled {
+  .bili-header > .bili-header__bar,
+  #internationalHeader,
+  .link-navbar,
+  #home_nav {
+    transition:
+      opacity var(--bew-duration-moderate, 300ms) var(--bew-ease-standard, ease),
+      transform var(--bew-duration-moderate, 300ms) var(--bew-ease-standard, ease),
+      visibility 0s linear 0s !important;
+  }
+}
+
+.bewly-original-video-top-bar-controlled.bewly-original-video-top-bar-hidden {
+  .bili-header > .bili-header__bar,
+  #internationalHeader,
+  .link-navbar,
+  #home_nav {
+    visibility: hidden !important;
+    opacity: 0 !important;
+    pointer-events: none !important;
+    transform: translateY(calc(-1 * var(--bew-top-bar-height))) !important;
+    transition-delay: 0s, 0s, var(--bew-duration-moderate, 300ms) !important;
   }
 }
 
 .remove-top-bar {
-  // remove the original top bar and adjust the height of the top bar to match the bewly top bar
+  // 隐藏原版第一行顶栏，并保留与 BewlyCat 顶栏一致的页面占位
   .bili-header .bili-header__bar,
-  .bili-header > .bili-header__channel,
-  .bili-header > .bewly-bili-channel-panel,
-  .header-channel,
   #internationalHeader,
   .link-navbar,
   #home_nav,
@@ -211,9 +317,17 @@
     height: var(--bew-top-bar-height) !important;
   }
 
-  // Remove the Bilibili Evolved's top bar
-  .custom-navbar {
-    display: none;
+  // BewlyCat 顶栏下保留首屏频道行，仅隐藏滚动后出现的原版顶栏第二行。
+  .header-channel,
+  .bili-header-channel-panel,
+  .bewly-bili-fixed-channel,
+  .bewly-bili-channel-panel {
+    display: none !important;
+    visibility: hidden !important;
+    height: 0 !important;
+    min-height: 0 !important;
+    margin: 0 !important;
+    padding: 0 !important;
   }
 
   // some pages have a white bar at the top; changing the top margin fixes this problem
@@ -223,15 +337,25 @@
   }
 }
 
+// Bewly / 原版顶栏开启时隐藏第三方顶栏；两者都关时不套这个 class，留给 Evolved 等扩展。
+.remove-custom-navbar {
+  .custom-navbar {
+    display: none !important;
+  }
+}
+
 .remove-top-bar-without-placeholder {
   // 隐藏所有可能的顶栏元素
   #biliMainHeader,
   .bili-header,
   .bili-header__bar,
+  .header-channel,
+  .bili-header-channel-panel,
   #internationalHeader,
   .link-navbar,
   #home_nav,
-  #bili-header-container {
+  #bili-header-container,
+  .custom-navbar {
     display: none !important;
   }
 

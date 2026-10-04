@@ -3,6 +3,7 @@ import { computed, nextTick, onMounted, ref, watch } from 'vue'
 
 import VideoCardGrid from '~/components/VideoCardGrid.vue'
 import { useBewlyApp } from '~/composables/useAppProvider'
+import { SEARCH_PAGE_SIZES } from '~/constants/searchApi'
 import type { GridLayoutType } from '~/logic'
 import { settings } from '~/logic'
 import api from '~/utils/api'
@@ -135,10 +136,10 @@ async function performSearch(loadMore: boolean): Promise<boolean> {
 
   const success = await search(
     keyword,
-    params => api.search.searchVideo(params),
+    (params, request) => api.search.searchVideo(params, request),
     {
       page: targetPage,
-      page_size: 30,
+      page_size: SEARCH_PAGE_SIZES.video,
       ...buildVideoSearchParams({
         loadMore: isLoadMore,
         context: context.value,
@@ -154,7 +155,7 @@ async function performSearch(loadMore: boolean): Promise<boolean> {
     return false
 
   const rawData = lastResponse.value.data
-  const incomingList = Array.isArray(rawData?.result) ? rawData.result : []
+  const incomingList: any[] = Array.isArray(rawData?.result) ? rawData.result : []
 
   // 过滤广告和应用时间过滤
   const filteredList = applyVideoTimeFilter(incomingList.filter(item => !isAdVideo(item)))
@@ -219,10 +220,10 @@ async function handlePageChange(page: number) {
 
   const success = await search(
     keyword,
-    params => api.search.searchVideo(params),
+    (params, request) => api.search.searchVideo(params, request),
     {
       page,
-      page_size: 30,
+      page_size: SEARCH_PAGE_SIZES.video,
       ...buildVideoSearchParams({
         loadMore: false,
         context: context.value,
@@ -237,7 +238,7 @@ async function handlePageChange(page: number) {
   }
 
   const rawData = lastResponse.value.data
-  const incomingList = Array.isArray(rawData?.result) ? rawData.result : []
+  const incomingList: any[] = Array.isArray(rawData?.result) ? rawData.result : []
 
   // 过滤广告和应用时间过滤
   const filteredList = applyVideoTimeFilter(incomingList.filter(item => !isAdVideo(item)))

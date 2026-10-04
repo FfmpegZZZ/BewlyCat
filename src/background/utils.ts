@@ -5,7 +5,13 @@
 import type Browser from 'webextension-polyfill'
 import browser from 'webextension-polyfill'
 
-import { addWbiSign, getWbiKeys, initWbiKeys, needsWbiSign, storeWbiKeys } from './wbiSign'
+import { waitWithSignal } from '~/utils/abort'
+
+import { createApiResponseCache } from './apiResponseCache'
+import { withRequestTimeout } from './requestTimeout'
+import { addWbiSign, clearWbiKeys, getWbiKeys, initWbiKeys, isBilibiliNavUrl, needsWbiSign, storeWbiKeys } from './wbiSign'
+
+const cacheApiResponse = createApiResponseCache()
 
 export class ApiRiskControlError extends Error {
   constructor(message: string = '检测到风控页面，API返回了HTML而不是JSON') {
@@ -24,12 +30,16 @@ async function toJsonHandler(data: Response): Promise<any> {
     throw new ApiRiskControlError()
   }
 
+  // Response body can only be consumed once. Keep a clone before json() so
+  // malformed/incorrectly typed HTML responses can still be inspected.
+  const fallbackResponse = data.clone()
+
   try {
     return await data.json()
   }
   catch (error) {
     // 如果JSON解析失败，可能也是风控页面
-    const text = await data.clone().text()
+    const text = await fallbackResponse.text()
     if (text.trim().startsWith('<!DOCTYPE') || text.trim().startsWith('<html')) {
       throw new ApiRiskControlError()
     }
@@ -40,47 +50,38 @@ function toData(data: Promise<any>): Promise<any> {
   return data
 }
 
-// if need sendResponse, use this
-// return a FetchAfterHandler function
-function sendResponseHandler(sendResponse: (response?: any) => void) {
-  return (data: any) => {
-    sendResponse(data)
-    return data
-  }
-}
-
 // 定义后处理流
 const AHS: {
   J_D: FetchAfterHandler[]
-  J_S: FetchAfterHandler[]
-  S: FetchAfterHandler[]
 } = {
   J_D: [toJsonHandler, toData],
-  J_S: [toJsonHandler, sendResponseHandler],
-  S: [sendResponseHandler],
 }
 
 interface Message {
   contentScriptQuery: string
+  bewlyNoCookie?: boolean
   [key: string]: any
 }
 
 interface _FETCH {
-  method: string
+  method: 'get' | 'post'
+  querySerializer?: (params: URLSearchParams) => string
   headers?: {
     [key: string]: any
   }
   body?: any
+  bodySerializer?: (body: Record<string, any>) => BodyInit
   credentials?: RequestCredentials
 }
 
 interface API {
   url: string
   _fetch: _FETCH
+  cacheMaxAge?: number
   params?: {
     [key: string]: any
   }
-  afterHandle: ((response: Response) => Response | Promise<Response>)[]
+  afterHandle: FetchAfterHandler[]
 }
 // 重载API 可以为函数
 type APIFunction = (message: Message, sender?: any, sendResponse?: (response?: any) => void) => any
@@ -90,7 +91,7 @@ interface APIMAP {
 }
 // 工厂函数API_LISTENER_FACTORY
 function apiListenerFactory(API_MAP: APIMAP) {
-  return async (data: any, sender?: Browser.Runtime.MessageSender) => {
+  return async (data: any, sender?: Browser.Runtime.MessageSender, signal?: AbortSignal) => {
     const typedMessage = data as Message
     const contentScriptQuery = typedMessage.contentScriptQuery
     // 检测是否有contentScriptQuery
@@ -103,28 +104,72 @@ function apiListenerFactory(API_MAP: APIMAP) {
 
     // eslint-disable-next-line node/prefer-global/process
     if (process.env.FIREFOX && sender && sender.tab?.id) {
-      if (api._fetch.credentials === 'omit')
-        return await doRequest(typedMessage, api)
+      if (api._fetch.credentials === 'omit' || typedMessage.bewlyNoCookie === true)
+        return await doCachedRequest(typedMessage, api, sender.tab, undefined, signal)
 
       // 获取tab信息以获取正确的cookieStoreId
       const tab = await browser.tabs.get(sender.tab.id)
       const storeId = tab.cookieStoreId || 'default'
-      const cookies = await browser.cookies.getAll({ storeId })
-      return await doRequest(typedMessage, api, undefined, cookies)
+      // Only copy cookies that the API target would receive naturally. Filtering
+      // by store alone can mix cookies from unrelated permitted Bilibili hosts.
+      const cookies = await browser.cookies.getAll({ url: api.url, storeId })
+      return await doCachedRequest(typedMessage, api, tab, cookies, signal)
     }
 
-    return await doRequest(typedMessage, api)
+    return await doCachedRequest(typedMessage, api, sender?.tab, undefined, signal)
   }
 }
 
-async function doRequest(message: Message, api: API, sendResponse?: (response?: any) => void, cookies?: Browser.Cookies.Cookie[]) {
+async function doCachedRequest(message: Message, api: API, tab?: Browser.Tabs.Tab, cookies?: Browser.Cookies.Cookie[], signal?: AbortSignal) {
+  signal?.throwIfAborted()
+  const request = () => doRequest(message, api, cookies, signal)
+  if (!api.cacheMaxAge || api._fetch.method.toLowerCase() !== 'get')
+    return request()
+
+  const noCookie = api._fetch.credentials === 'omit' || message.bewlyNoCookie === true
+  let accountId = ''
+  if (!noCookie) {
+    try {
+      // Firefox 使用实际请求的容器 Cookie；其他浏览器与后台 fetch 的默认 Cookie 保持一致。
+      const accountCookie = cookies
+        ? cookies.find(cookie => cookie.name === 'DedeUserID')
+        : await browser.cookies.get({ url: api.url, name: 'DedeUserID' })
+      accountId = accountCookie?.value ?? ''
+    }
+    catch {
+      // 无法确认账号时直接请求，避免误用其他账号的推荐。
+      return request()
+    }
+  }
+
+  const key = JSON.stringify([
+    api.url,
+    tab?.incognito ?? false,
+    tab?.cookieStoreId ?? 'default',
+    noCookie,
+    accountId,
+    Object.entries(message).sort(([a], [b]) => a.localeCompare(b)),
+  ])
+  // 缓存中的网络请求由所有等待者共享；一个页面取消只退出自己的等待。
+  signal?.throwIfAborted()
+  return waitWithSignal(cacheApiResponse(key, api.cacheMaxAge, () => doRequest(message, api, cookies)), signal)
+}
+
+function doRequest(message: Message, api: API, cookies?: Browser.Cookies.Cookie[], signal?: AbortSignal) {
+  if (api._fetch.method.toLowerCase() === 'get')
+    return withRequestTimeout(requestSignal => performApiRequest(message, api, cookies, requestSignal), signal)
+  return performApiRequest(message, api, cookies)
+}
+
+async function performApiRequest(message: Message, api: API, cookies?: Browser.Cookies.Cookie[], signal?: AbortSignal) {
   try {
-    let { contentScriptQuery, ...rest } = message
+    let { contentScriptQuery, bewlyNoCookie = false, ...rest } = message
     // rest above two part body or params
     rest = rest || {}
 
-    let { _fetch, url, params = {}, afterHandle } = api
-    const { method, headers = {}, body, credentials = 'include' } = _fetch as _FETCH
+    const { _fetch, url, params = {}, afterHandle } = api
+    const { method, headers = {}, body, bodySerializer, querySerializer, credentials: configuredCredentials = 'include' } = _fetch as _FETCH
+    const credentials: RequestCredentials = bewlyNoCookie ? 'omit' : configuredCredentials
     const isGET = method.toLocaleLowerCase() === 'get'
     // merge params and body
     const targetParams = Object.assign({}, params)
@@ -132,19 +177,23 @@ async function doRequest(message: Message, api: API, sendResponse?: (response?: 
     Object.keys(rest).forEach((key) => {
       if (body && body[key] !== undefined)
         targetBody[key] = rest[key]
-      else
+      if (params[key] !== undefined)
+        targetParams[key] = rest[key]
+      else if (!body || body[key] === undefined)
         targetParams[key] = rest[key]
     })
 
     const baseUrl = url
     const needsWbi = needsWbiSign(url)
+    const wbiKeyOptions = { noCookie: credentials === 'omit' }
 
     // 如果需要WBI签名但没有密钥，主动获取密钥
-    if (needsWbi && !getWbiKeys()) {
+    if (needsWbi && !getWbiKeys(wbiKeyOptions)) {
       try {
-        await initWbiKeys({ noCookie: credentials === 'omit' })
+        await waitWithSignal(initWbiKeys(wbiKeyOptions), signal)
       }
       catch (error) {
+        signal?.throwIfAborted()
         // 获取密钥失败，继续执行（降级到无签名请求）
         console.error('[doRequest] Failed to fetch WBI keys:', error)
       }
@@ -152,12 +201,13 @@ async function doRequest(message: Message, api: API, sendResponse?: (response?: 
 
     // 内部函数：执行实际请求
     const performRequest = (useWbi: boolean) => {
+      signal?.throwIfAborted()
       let requestUrl = baseUrl
       let requestParams = Object.assign({}, targetParams)
 
       // 为需要WBI签名的API添加签名
       if (needsWbi && useWbi) {
-        requestParams = addWbiSign(requestParams)
+        requestParams = addWbiSign(requestParams, wbiKeyOptions)
       }
       // generate params
       if (Object.keys(requestParams).length) {
@@ -170,15 +220,17 @@ async function doRequest(message: Message, api: API, sendResponse?: (response?: 
             urlParams.append(key, value)
           }
         }
-        requestUrl += `?${urlParams.toString()}`
+        requestUrl += `?${querySerializer ? querySerializer(urlParams) : urlParams.toString()}`
       }
 
       // generate body
       let requestBody = targetBody
       if (!isGET) {
-        requestBody = (headers && headers['Content-Type'] && headers['Content-Type'].includes('application/x-www-form-urlencoded'))
-          ? new URLSearchParams(targetBody)
-          : JSON.stringify(targetBody)
+        requestBody = bodySerializer
+          ? bodySerializer(targetBody)
+          : (headers && headers['Content-Type'] && headers['Content-Type'].includes('application/x-www-form-urlencoded'))
+              ? new URLSearchParams(targetBody)
+              : JSON.stringify(targetBody)
       }
 
       // generate cookies
@@ -203,6 +255,7 @@ async function doRequest(message: Message, api: API, sendResponse?: (response?: 
         method,
         headers: requestHeaders,
         credentials,
+        signal,
       }
       if (!isGET)
         fetchOpt.body = requestBody
@@ -212,13 +265,23 @@ async function doRequest(message: Message, api: API, sendResponse?: (response?: 
 
     // 标记是否已经尝试过无 WBI 重试
     let hasTriedWithoutWbi = false
+    let hasRefreshedWbiKeys = false
+
+    function isWbiSignatureRejected(response: unknown): boolean {
+      return Boolean(
+        response
+        && typeof response === 'object'
+        && 'code' in response
+        && response.code === -403,
+      )
+    }
 
     // 执行完整请求流程的函数（包括响应处理）
     const executeFullRequest = async (useWbi: boolean) => {
       let response = await performRequest(useWbi)
 
       // 如果是获取用户信息的API，在响应后存储WBI密钥
-      if (baseUrl.includes('https://api.bilibili.com/x/web-interface/nav')) {
+      if (isBilibiliNavUrl(baseUrl)) {
         const clonedResponse = response.clone()
 
         try {
@@ -227,7 +290,7 @@ async function doRequest(message: Message, api: API, sendResponse?: (response?: 
           if (data.code === 0 && data.data && data.data.wbi_img) {
             const { img_url, sub_url } = data.data.wbi_img
             if (img_url && sub_url) {
-              storeWbiKeys(img_url, sub_url)
+              storeWbiKeys(img_url, sub_url, wbiKeyOptions)
             }
           }
         }
@@ -237,14 +300,8 @@ async function doRequest(message: Message, api: API, sendResponse?: (response?: 
       }
 
       // 执行 afterHandle 处理
-      for (const func of afterHandle) {
-        if (func.name === sendResponseHandler.name && sendResponse) {
-          response = await sendResponseHandler(sendResponse)(response as any)
-        }
-        else {
-          response = await func(response as any)
-        }
-      }
+      for (const func of afterHandle)
+        response = await func(response as any)
 
       return response
     }
@@ -253,22 +310,65 @@ async function doRequest(message: Message, api: API, sendResponse?: (response?: 
     const executeRequestWithRetry = async () => {
       try {
         // 首次请求（使用 WBI 签名，如果需要）
-        return await executeFullRequest(true)
+        let response = await executeFullRequest(true)
+
+        // WBI 密钥可能在缓存有效期内被服务端轮换。收到 -403 时强制刷新一次，
+        // 避免把签名失效误判成业务侧的访问权限不足。
+        if (needsWbi && !hasRefreshedWbiKeys && isWbiSignatureRejected(response)) {
+          hasRefreshedWbiKeys = true
+          console.warn('[BewlyCat][WBI] 签名被接口拒绝，刷新密钥后重试', {
+            url: baseUrl,
+            noCookie: wbiKeyOptions.noCookie,
+            code: -403,
+          })
+          clearWbiKeys(wbiKeyOptions)
+          const refreshed = await waitWithSignal(initWbiKeys(wbiKeyOptions), signal)
+          if (refreshed) {
+            response = await executeFullRequest(true)
+            if (isWbiSignatureRejected(response)) {
+              console.error('[BewlyCat][WBI] 刷新密钥后签名仍被接口拒绝', {
+                url: baseUrl,
+                noCookie: wbiKeyOptions.noCookie,
+                code: -403,
+              })
+            }
+          }
+          else {
+            console.error('[BewlyCat][WBI] 签名被接口拒绝且密钥刷新失败', {
+              url: baseUrl,
+              noCookie: wbiKeyOptions.noCookie,
+              code: -403,
+            })
+          }
+        }
+
+        return response
       }
       catch (error) {
+        // 用户取消和总超时不能触发无签名重试。
+        signal?.throwIfAborted()
         // 如果使用了 WBI 签名且失败，尝试不带 WBI 签名重试
         if (needsWbi && !hasTriedWithoutWbi) {
           hasTriedWithoutWbi = true
+          const errorRecord = error && typeof error === 'object'
+            ? error as Record<string, unknown>
+            : undefined
+          console.warn('[BewlyCat][WBI] 带签名请求异常，降级为无签名请求', {
+            url: baseUrl,
+            noCookie: wbiKeyOptions.noCookie,
+            code: errorRecord?.code,
+            message: error instanceof Error ? error.message : String(error),
+            error,
+          })
           return await executeFullRequest(false)
         }
         throw error
       }
     }
 
-    url = baseUrl + (Object.keys(targetParams).length ? '?...' : '')
-
     // 执行请求并进行统一错误处理
     return executeRequestWithRetry().catch((error) => {
+      signal?.throwIfAborted()
       if (error instanceof ApiRiskControlError) {
         // 返回统一的风控错误格式
         const riskError = new Error(error.message)
@@ -288,6 +388,7 @@ async function doRequest(message: Message, api: API, sendResponse?: (response?: 
     })
   }
   catch (e) {
+    signal?.throwIfAborted()
     const initError = new Error(e instanceof Error ? e.message : '请求初始化失败')
     Object.assign(initError, {
       code: -1,
@@ -305,7 +406,6 @@ export {
   type APIMAP,
   type FetchAfterHandler,
   type Message,
-  sendResponseHandler,
   toData,
   toJsonHandler,
 }

@@ -1,80 +1,206 @@
-import type { Video } from '~/components/VideoCard/types'
-import { useStorageLocal } from '~/composables/useStorageLocal'
+import { shallowRef } from 'vue'
+import browser from 'webextension-polyfill'
 
-export const VIDEO_VISIT_HISTORY_RETENTION_MS = 30 * 24 * 60 * 60 * 1000
-export const VIDEO_VISIT_HISTORY_MAX_ENTRIES = 1000
+import { settings, settingsReady } from '~/logic'
 
-export type VideoVisitHistory = Record<string, number>
+export const VIDEO_VISIT_HISTORY_MAX_ENTRIES = 10_000
 
-type VideoIdentity = Partial<Pick<Video, 'aid' | 'bvid' | 'id'>>
+const VIDEO_VISIT_HISTORY_STORAGE_KEY = 'bewlycat_video_visit_history'
+const LEGACY_VIDEO_VISIT_HISTORY_STORAGE_KEY = 'videoVisitHistory'
+const VIDEO_VISIT_HISTORY_MIGRATION_KEY = 'bewlycat_video_visit_history_migrated'
+
+/**
+ * 仅打开过的视频只存访问时间；在视频页实际播放过的视频存
+ * `[访问时间, 播放进度秒数, 视频时长秒数]`，用紧凑元组控制本地缓存体积。
+ */
+export type VideoVisitEntry = number | [visitedAt: number, progress: number, duration: number]
+export type VideoVisitHistory = Record<string, VideoVisitEntry>
+
+interface VideoWatchedState {
+  status: 'watched'
+  progress: number
+  duration: number
+  /** 播放进度百分比（0–100）。 */
+  percentage: number
+}
+
+export type VideoWatchState = { status: 'browsed' } | VideoWatchedState
+
+export interface VideoIdentity {
+  aid?: number | string
+  bvid?: string
+  id?: number | string
+}
 
 function getVideoHistoryKeys(video: VideoIdentity): string[] {
   const keys: string[] = []
+  const bvid = video.bvid?.trim()
 
-  if (video.bvid?.trim())
-    keys.push(`bv:${video.bvid.trim().toLowerCase()}`)
+  if (bvid)
+    keys.push(`bv:${bvid.toLowerCase()}`)
 
-  const aid = video.aid ?? video.id
-  if (typeof aid === 'number' && Number.isFinite(aid) && aid > 0)
+  const aid = String(video.aid ?? video.id ?? '').trim()
+  if (/^[1-9]\d*$/.test(aid))
     keys.push(`av:${aid}`)
 
   return keys
 }
 
-function getPreferredVideoHistoryKey(video: VideoIdentity): string | undefined {
-  return getVideoHistoryKeys(video)[0]
+function isValidTimestamp(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0
 }
 
-export function pruneVideoVisitHistory(history: VideoVisitHistory, now = Date.now()): VideoVisitHistory {
-  const expiresBefore = now - VIDEO_VISIT_HISTORY_RETENTION_MS
+function normalizeVideoVisitEntry(entry: unknown): VideoVisitEntry | undefined {
+  if (isValidTimestamp(entry))
+    return entry
 
+  if (!Array.isArray(entry) || !isValidTimestamp(entry[0]))
+    return undefined
+
+  const [visitedAt, progress, duration] = entry
+  if (!isValidTimestamp(duration) || typeof progress !== 'number' || !Number.isFinite(progress))
+    return visitedAt
+
+  return [visitedAt, Math.min(duration, Math.max(0, progress)), duration]
+}
+
+function getEntryVisitedAt(entry: VideoVisitEntry): number {
+  return typeof entry === 'number' ? entry : entry[0]
+}
+
+export function pruneVideoVisitHistory(history: Record<string, unknown>): VideoVisitHistory {
   return Object.fromEntries(
     Object.entries(history)
-      .filter(([, visitedAt]) =>
-        Number.isFinite(visitedAt) && visitedAt >= expiresBefore,
-      )
-      .sort(([, leftVisitedAt], [, rightVisitedAt]) => rightVisitedAt - leftVisitedAt)
+      .map(([key, entry]) => [key, normalizeVideoVisitEntry(entry)] as const)
+      .filter((item): item is readonly [string, VideoVisitEntry] => item[1] !== undefined)
+      .sort(([, leftEntry], [, rightEntry]) => getEntryVisitedAt(rightEntry) - getEntryVisitedAt(leftEntry))
       .slice(0, VIDEO_VISIT_HISTORY_MAX_ENTRIES),
   )
 }
 
-let storageReady = false
-const pendingVisits = new Map<string, number>()
+/** 合并同一视频的两条记录：访问时间取较新者，播放进度取较新的一条。 */
+function mergeVideoVisitEntry(current: VideoVisitEntry | undefined, next: VideoVisitEntry): VideoVisitEntry {
+  if (current === undefined)
+    return next
 
-const videoVisitHistory = useStorageLocal<VideoVisitHistory>('videoVisitHistory', {}, {
-  writeDefaults: false,
-  onReady: (history) => {
-    storageReady = true
+  const visitedAt = Math.max(getEntryVisitedAt(current), getEntryVisitedAt(next))
+  const currentProgress = typeof current === 'number' ? undefined : current
+  const nextProgress = typeof next === 'number' ? undefined : next
+  const progressEntry = currentProgress && nextProgress
+    ? (nextProgress[0] >= currentProgress[0] ? nextProgress : currentProgress)
+    : nextProgress ?? currentProgress
 
-    const hadPendingVisits = pendingVisits.size > 0
-    pendingVisits.forEach((visitedAt, key) => {
-      history[key] = Math.max(history[key] ?? 0, visitedAt)
-    })
-    pendingVisits.clear()
+  return progressEntry ? [visitedAt, progressEntry[1], progressEntry[2]] : visitedAt
+}
 
-    const normalizedHistory = pruneVideoVisitHistory(history)
-    if (hadPendingVisits || Object.keys(normalizedHistory).length !== Object.keys(history).length) {
-      queueMicrotask(() => {
-        videoVisitHistory.value = normalizedHistory
-      })
-    }
-  },
+function parseVideoVisitHistory(rawValue: unknown): VideoVisitHistory {
+  try {
+    const value = typeof rawValue === 'string' ? JSON.parse(rawValue) : rawValue
+    if (!value || typeof value !== 'object' || Array.isArray(value))
+      return {}
+
+    return pruneVideoVisitHistory(value as Record<string, unknown>)
+  }
+  catch {
+    return {}
+  }
+}
+
+function readVideoVisitHistory(): VideoVisitHistory {
+  try {
+    return parseVideoVisitHistory(localStorage.getItem(VIDEO_VISIT_HISTORY_STORAGE_KEY))
+  }
+  catch {
+    return {}
+  }
+}
+
+const videoVisitHistory = shallowRef<VideoVisitHistory>(readVideoVisitHistory())
+let settingsLoaded = false
+
+void settingsReady.then(() => {
+  settingsLoaded = true
 })
 
-function recordVideoVisit(video: VideoIdentity, visitedAt = Date.now()): boolean {
-  const key = getPreferredVideoHistoryKey(video)
-  if (!key)
-    return false
+function persistVideoVisitHistory(history: VideoVisitHistory) {
+  const normalizedHistory = pruneVideoVisitHistory(history)
+  videoVisitHistory.value = normalizedHistory
 
-  if (!storageReady) {
-    pendingVisits.set(key, Math.max(pendingVisits.get(key) ?? 0, visitedAt))
-    return true
+  try {
+    localStorage.setItem(VIDEO_VISIT_HISTORY_STORAGE_KEY, JSON.stringify(normalizedHistory))
+  }
+  catch (error) {
+    console.warn('[BewlyCat] Failed to persist video visit history.', error)
+  }
+}
+
+function migrateLegacyVideoVisitHistory() {
+  try {
+    if (localStorage.getItem(VIDEO_VISIT_HISTORY_MIGRATION_KEY) === '1')
+      return
+  }
+  catch {
+    return
   }
 
+  void browser.storage.local.get(LEGACY_VIDEO_VISIT_HISTORY_STORAGE_KEY)
+    .then((result) => {
+      const legacyHistory = parseVideoVisitHistory(result[LEGACY_VIDEO_VISIT_HISTORY_STORAGE_KEY])
+      const mergedHistory = { ...videoVisitHistory.value }
+
+      Object.entries(legacyHistory).forEach(([key, entry]) => {
+        mergedHistory[key] = mergeVideoVisitEntry(mergedHistory[key], entry)
+      })
+
+      persistVideoVisitHistory(mergedHistory)
+      localStorage.setItem(VIDEO_VISIT_HISTORY_MIGRATION_KEY, '1')
+    })
+    .catch(error => console.warn('[BewlyCat] Failed to migrate video visit history.', error))
+}
+
+migrateLegacyVideoVisitHistory()
+
+if (typeof window !== 'undefined') {
+  window.addEventListener('storage', (event) => {
+    if (event.key === VIDEO_VISIT_HISTORY_STORAGE_KEY)
+      videoVisitHistory.value = parseVideoVisitHistory(event.newValue)
+  })
+}
+
+function recordVideoVisitEntry(video: VideoIdentity, entry: VideoVisitEntry): boolean {
+  if (!settingsLoaded || !settings.value.showVideoWatchedBadge)
+    return false
+
+  const keys = getVideoHistoryKeys(video)
+  if (!keys.length)
+    return false
+
   const nextHistory = { ...videoVisitHistory.value }
-  nextHistory[key] = visitedAt
-  videoVisitHistory.value = pruneVideoVisitHistory(nextHistory, visitedAt)
+  keys.forEach((key) => {
+    nextHistory[key] = mergeVideoVisitEntry(nextHistory[key], entry)
+  })
+  persistVideoVisitHistory(nextHistory)
   return true
+}
+
+/** 记录视频已被打开（已浏览），保留此前的播放进度。 */
+export function recordVideoVisit(video: VideoIdentity, visitedAt = Date.now()): boolean {
+  return recordVideoVisitEntry(video, visitedAt)
+}
+
+/** 记录视频页的实际播放进度（已观看）。 */
+export function recordVideoWatchProgress(
+  video: VideoIdentity,
+  progress: number,
+  duration: number,
+  visitedAt = Date.now(),
+): boolean {
+  if (!isValidTimestamp(duration) || !Number.isFinite(progress))
+    return false
+
+  const roundedDuration = Math.max(1, Math.round(duration))
+  const roundedProgress = Math.min(roundedDuration, Math.max(0, Math.floor(progress)))
+  return recordVideoVisitEntry(video, [visitedAt, roundedProgress, roundedDuration])
 }
 
 export function getVideoIdentityFromUrl(url: string): VideoIdentity | undefined {
@@ -85,16 +211,11 @@ export function getVideoIdentityFromUrl(url: string): VideoIdentity | undefined 
 
     const bvidPathMatch = urlObject.pathname.match(/\/(BV[a-z0-9]+)(?:\/|$)/i)
     const bvid = urlObject.searchParams.get('bvid') || bvidPathMatch?.[1]
-    if (bvid)
-      return { bvid }
-
     const aidPathMatch = urlObject.pathname.match(/\/av(\d+)(?:\/|$)/i)
-    const aidText = urlObject.searchParams.get('avid') || urlObject.searchParams.get('aid') || aidPathMatch?.[1]
-    if (aidText) {
-      const aid = Number.parseInt(aidText, 10)
-      if (Number.isFinite(aid) && aid > 0)
-        return { aid, id: aid }
-    }
+    const aid = urlObject.searchParams.get('avid') || urlObject.searchParams.get('aid') || aidPathMatch?.[1]
+
+    if (bvid || aid)
+      return { bvid: bvid || undefined, aid: aid || undefined }
   }
   catch {
     return undefined
@@ -108,11 +229,29 @@ export function recordVideoVisitFromUrl(url: string, visitedAt = Date.now()): bo
   return identity ? recordVideoVisit(identity, visitedAt) : false
 }
 
-export function wasVideoVisitedRecently(video: VideoIdentity, now = Date.now()): boolean {
-  const expiresBefore = now - VIDEO_VISIT_HISTORY_RETENTION_MS
+export function getVideoWatchState(video: VideoIdentity): VideoWatchState | undefined {
+  let visited = false
+  let latestProgress: [number, number, number] | undefined
 
-  return getVideoHistoryKeys(video).some((key) => {
-    const visitedAt = videoVisitHistory.value[key]
-    return Number.isFinite(visitedAt) && visitedAt >= expiresBefore
-  })
+  for (const key of getVideoHistoryKeys(video)) {
+    const entry = videoVisitHistory.value[key]
+    if (entry === undefined)
+      continue
+
+    visited = true
+    if (typeof entry !== 'number' && (!latestProgress || entry[0] > latestProgress[0]))
+      latestProgress = entry
+  }
+
+  if (latestProgress) {
+    const [, progress, duration] = latestProgress
+    return {
+      status: 'watched',
+      progress,
+      duration,
+      percentage: Math.min(100, Math.max(0, (progress / duration) * 100)),
+    }
+  }
+
+  return visited ? { status: 'browsed' } : undefined
 }

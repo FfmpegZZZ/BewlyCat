@@ -1,102 +1,67 @@
 <script lang="ts" setup>
-import QRCodeVue from 'qrcode.vue'
+import { useI18n } from 'vue-i18n'
 import { useToast } from 'vue-toastification'
 import draggable from 'vuedraggable'
 
+import AppAuthorizationDialog from '~/components/AppAuthorizationDialog.vue'
 import Input from '~/components/Input.vue'
 import Radio from '~/components/Radio.vue'
 import { HomeSubPage } from '~/contentScripts/views/Home/types'
 import { appAuthTokens, settings } from '~/logic'
+import type { RecommendationMode, Settings, TabsPosition } from '~/logic/storage'
 import { useMainStore } from '~/stores/mainStore'
-import { getTVLoginQRCode, hasValidAppAuthTokens, pollTVLoginQRCode, revokeAccessKey, saveAppAuthTokens } from '~/utils/authProvider'
+import { hasValidAppAuthTokens, revokeAccessKey } from '~/utils/authProvider'
 
 import SettingsItem from '../../components/SettingsItem.vue'
 import SettingsItemGroup from '../../components/SettingsItemGroup.vue'
+import SettingsSegmentedControl from '../../components/SettingsSegmentedControl.vue'
 import SearchPage from '../SearchPage/SearchPage.vue'
 import FilterByTitleTable from './components/FilterByTitleTable.vue'
 import FilterByUserTable from './components/FilterByUserTable.vue'
 
 const mainStore = useMainStore()
+const { t } = useI18n()
 const toast = useToast()
+
+const recommendationModeOptions = computed<{ label: string, value: RecommendationMode }[]>(() => [
+  { label: 'Web', value: 'web' },
+  { label: t('settings.recommendation_mode_web_no_cookie'), value: 'webNoCookie' },
+  { label: 'App', value: 'app' },
+])
+
+const followingUploaderSortOptions = computed<{ label: string, value: Settings['followingUploaderSort'] }[]>(() => [
+  { label: t('settings.following_sort_updated'), value: 'updated' },
+  { label: t('settings.following_sort_group'), value: 'group' },
+])
+
+const homeTabsPositionOptions = computed<{ label: string, value: TabsPosition }[]>(() => [
+  { label: t('common.position.left'), value: 'left' },
+  { label: t('common.position.center'), value: 'center' },
+])
 
 const showSearchPageModeSharedSettings = ref<boolean>(false)
 const showQRCodeDialog = ref<boolean>(false)
-const loginQRCodeUrl = ref<string>()
-const pollLoginQRCodeInterval = ref<any>(null)
-const authCode = ref<string>('')
-const qrcodeMsg = ref<string>('')
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
 
 const appAccessToken = computed(() => appAuthTokens.value.accessToken)
 
-onDeactivated(() => {
-  clearInterval(pollLoginQRCodeInterval.value)
-})
-
-onBeforeUnmount(() => {
-  clearInterval(pollLoginQRCodeInterval.value)
-})
-
-function changeAppRecommendationMode() {
-  settings.value.recommendationMode = 'app'
-  if (!hasValidAppAuthTokens())
+function handleRecommendationModeChange(mode: RecommendationMode) {
+  if (mode === 'app' && !hasValidAppAuthTokens())
     handleAuthorize()
 }
 
-async function handleAuthorize() {
+function handleAuthorize() {
   showQRCodeDialog.value = true
-  try {
-    await setLoginQRCode()
-    pollLoginQRCode()
-  }
-  catch (error) {
-    console.error(error)
-  }
 }
 
 function handleRevoke() {
   revokeAccessKey()
 }
 
-async function setLoginQRCode() {
-  const res = await getTVLoginQRCode()
-  if (res.code === 0) {
-    loginQRCodeUrl.value = res.data.url
-    authCode.value = res.data.auth_code
-  }
-}
-
-function pollLoginQRCode() {
-  clearInterval(pollLoginQRCodeInterval.value)
-
-  pollLoginQRCodeInterval.value = setInterval(async () => {
-    const pollRes = await pollTVLoginQRCode(authCode.value)
-
-    // 0：成功
-    // -3：API校验密匙错误
-    // -400：请求错误
-    // -404：啥都木有
-    // 86038：二维码已失效
-    // 86039：二维码尚未确认
-    // 86090：二维码已扫码未确认
-    if (pollRes.code !== 0)
-      qrcodeMsg.value = pollRes.message
-    if (pollRes.code === 0) {
-      showQRCodeDialog.value = false
-      saveAppAuthTokens(pollRes.data)
-      clearInterval(pollLoginQRCodeInterval.value)
-      toast.success('授权成功')
-    }
-    else if (pollRes.code === 86038) {
-      await setLoginQRCode()
-    }
-    else if (pollRes.code === -3 || pollRes.code === -400 || pollRes.code === -404) {
-      toast.error(pollRes.message)
-    }
-  }, 3000)
-}
-
 function handleCloseQRCodeDialog() {
-  clearInterval(pollLoginQRCodeInterval.value)
   showQRCodeDialog.value = false
 }
 
@@ -123,17 +88,26 @@ function handleImport(filterType: 'title' | 'user') {
 
     try {
       const fileContent = await file.text()
-      const importedFilters = JSON.parse(fileContent) as { keyword: string, remark: string }[]
+      const importedFilters: unknown = JSON.parse(fileContent)
 
-      if (!Array.isArray(importedFilters) || !importedFilters.every(filter => 'keyword' in filter && 'remark' in filter)) {
+      if (!Array.isArray(importedFilters)
+        || !importedFilters.every(filter => isRecord(filter)
+          && typeof filter.keyword === 'string'
+          && typeof filter.remark === 'string'
+          && filter.keyword.trim() !== '')) {
         throw new Error('Invalid file format')
       }
 
+      const normalized = importedFilters.map(filter => ({
+        keyword: filter.keyword.trim(),
+        remark: filter.remark.trim(),
+      }))
+
       if (filterType === 'title') {
-        settings.value.filterByTitle = importedFilters
+        settings.value.filterByTitle = normalized
       }
       else {
-        settings.value.filterByUser = importedFilters
+        settings.value.filterByUser = normalized
       }
       // toast.success(`${filterType} filters imported successfully`)
     }
@@ -185,56 +159,25 @@ function handleToggleHomeTab(tab: any) {
 
 <template>
   <div>
-    <SettingsItemGroup :title="$t('settings.group_version_reminder')">
-      <SettingsItem
-        :title="$t('settings.enable_version_reminder')"
-        :desc="$t('settings.enable_version_reminder_desc')"
-        right-width="auto"
-      >
-        <Radio v-model="settings.enableVersionReminder" />
-      </SettingsItem>
-    </SettingsItemGroup>
-
     <SettingsItemGroup :title="$t('settings.group_recommendation_mode')">
       <SettingsItem :title="$t('settings.recommendation_mode')" right-width="auto">
         <template #desc>
           <p>{{ $t('settings.recommendation_mode_desc') }}</p>
         </template>
-        <div class="recommendation-mode-selector" rounded="$bew-radius" bg="$bew-fill-1" p-1>
-          <div
-            class="recommendation-mode-option"
-            py-1 cursor-pointer text-center rounded="$bew-radius"
-            :style="{
-              background: settings.recommendationMode === 'web' ? 'var(--bew-theme-color)' : '',
-              color: settings.recommendationMode === 'web' ? 'white' : '',
-            }"
-            @click="settings.recommendationMode = 'web'"
-          >
-            Web
-          </div>
-          <div
-            class="recommendation-mode-option"
-            py-1 cursor-pointer text-center rounded="$bew-radius"
-            :style="{
-              background: settings.recommendationMode === 'webNoCookie' ? 'var(--bew-theme-color)' : '',
-              color: settings.recommendationMode === 'webNoCookie' ? 'white' : '',
-            }"
-            @click="settings.recommendationMode = 'webNoCookie'"
-          >
-            {{ $t('settings.recommendation_mode_web_no_cookie') }}
-          </div>
-          <div
-            class="recommendation-mode-option"
-            py-1 cursor-pointer text-center rounded="$bew-radius"
-            :style="{
-              background: settings.recommendationMode === 'app' ? 'var(--bew-theme-color)' : '',
-              color: settings.recommendationMode === 'app' ? 'white' : '',
-            }"
-            @click="changeAppRecommendationMode"
-          >
-            App
-          </div>
-        </div>
+        <SettingsSegmentedControl
+          v-model="settings.recommendationMode"
+          :label="$t('settings.recommendation_mode')"
+          :options="recommendationModeOptions"
+          @change="handleRecommendationModeChange"
+        />
+      </SettingsItem>
+
+      <SettingsItem
+        :title="$t('settings.show_recommendation_mode_switcher')"
+        :desc="$t('settings.show_recommendation_mode_switcher_desc')"
+        right-width="auto"
+      >
+        <Radio v-model="settings.showRecommendationModeSwitcher" />
       </SettingsItem>
 
       <SettingsItem
@@ -276,48 +219,115 @@ function handleToggleHomeTab(tab: any) {
         <Radio v-model="settings.preserveForYouState" />
       </SettingsItem>
 
-      <Dialog
+      <AppAuthorizationDialog
         v-if="showQRCodeDialog"
-        width="50%"
-        max-width="800px"
-        append-to-bewly-body
-        :show-footer="false"
-        :title="$t('settings.authorize_app')" center
         @close="handleCloseQRCodeDialog"
+      />
+    </SettingsItemGroup>
+
+    <SettingsItemGroup
+      :title="$t('settings.group_home_tabs')"
+    >
+      <SettingsItem
+        :title="$t('settings.home_tabs_adjustment')"
+        :desc="$t('settings.home_tabs_adjustment_desc')"
+        right-width="auto"
       >
-        <div flex="~ col gap-4 items-center">
-          <div>
-            <p mb-2 text-center>
-              {{ $t('settings.scan_qrcode_desc') }}
-            </p>
-            <p text="$bew-text-2 sm">
-              {{ $t('settings.authorize_app_desc') }}
-            </p>
+        <template #title>
+          <div flex="~ gap-4 items-center">
+            {{ $t('settings.home_tabs_adjustment') }}
+            <Button size="small" type="secondary" @click="resetHomeTabs">
+              <template #left>
+                <div i-mingcute:back-line />
+              </template>
+              {{ $t('common.operation.reset') }}
+            </Button>
           </div>
+        </template>
 
-          <div bg-white border="white 4">
-            <QRCodeVue v-if="loginQRCodeUrl" :value="loginQRCodeUrl" :size="150" />
-            <div v-else w-150px h-150px grid="~ place-items-center">
-              <div i-svg-spinners:ring-resize />
-            </div>
-          </div>
-
-          <p>{{ qrcodeMsg }}</p>
-
-          <Button
-            type="secondary"
-            @click="setLoginQRCode"
+        <template #bottom>
+          <draggable
+            v-model="settings.homePageTabVisibilityList"
+            item-key="page"
+            :component-data="{ style: 'display: flex; gap: 0.5rem; flex-wrap: wrap;' }"
           >
-            {{ $t('common.operation.refresh') }}
+            <template #item="{ element }">
+              <div
+                class="bew-settings-option--lift"
+                flex="~ gap-2 items-center" p="x-4 y-2" bg="$bew-fill-1" rounded="$bew-radius" cursor-all-scroll
+                duration-300
+                :style="{
+                  background: element.visible ? 'var(--bew-theme-color-20)' : 'var(--bew-fill-1)',
+                  color: element.visible ? 'var(--bew-theme-color)' : 'var(--bew-text-1)',
+                }"
+                @click="handleToggleHomeTab(element)"
+              >
+                {{ $t(mainStore.homeTabs.find(tab => tab.page === element.page)?.i18nKey ?? '') }}
+              </div>
+            </template>
+          </draggable>
+        </template>
+      </SettingsItem>
+      <SettingsItem :title="$t('settings.home_tabs_position')" right-width="auto">
+        <SettingsSegmentedControl
+          v-model="settings.homeTabsPosition"
+          :label="$t('settings.home_tabs_position')"
+          :options="homeTabsPositionOptions"
+        />
+      </SettingsItem>
+      <SettingsItem :title="$t('settings.fixed_home_tabs_on_home_page')" right-width="auto">
+        <Radio v-model="settings.fixedHomeTabsOnHomePage" />
+      </SettingsItem>
+    </SettingsItemGroup>
+
+    <SettingsItemGroup :title="$t('settings.group_search_page_mode')">
+      <SettingsItem :title="$t('settings.use_search_page_mode')" right-width="auto">
+        <Radio v-model="settings.useSearchPageModeOnHomePage" />
+      </SettingsItem>
+      <template v-if="settings.useSearchPageModeOnHomePage">
+        <SettingsItem :title="$t('settings.settings_shared_with_the_search_page')" right-width="auto">
+          <template #desc>
+            <span class="bew-warning-text">{{ $t('settings.settings_shared_with_the_search_page_desc') }}</span>
+          </template>
+          <Button type="secondary" center @click="showSearchPageModeSharedSettings = true">
+            {{ $t('settings.btn.open_settings') }}
           </Button>
-        </div>
-      </Dialog>
+
+          <Dialog
+            v-if="showSearchPageModeSharedSettings"
+            width="80%"
+            max-width="900px"
+            content-height="64vh"
+            :show-footer="false"
+            :title="$t('settings.settings_shared_with_the_search_page')"
+            append-to-bewly-body
+            @close="showSearchPageModeSharedSettings = false"
+          >
+            <template #desc>
+              <span class="bew-warning-text">{{ $t('settings.settings_shared_with_the_search_page_desc') }}</span>
+            </template>
+
+            <SearchPage />
+          </Dialog>
+        </SettingsItem>
+
+        <SettingsItem :title="$t('settings.search_page_mode_wallpaper_fixed')" right-width="auto">
+          <Radio v-model="settings.searchPageModeWallpaperFixed" />
+        </SettingsItem>
+      </template>
     </SettingsItemGroup>
 
     <SettingsItemGroup
       :title="$t('settings.group_recommendation_filters')"
       :desc="$t('settings.group_recommendation_filters_desc')"
     >
+      <SettingsItem
+        :title="$t('settings.show_recommendation_filter_risk_warning')"
+        :desc="$t('settings.show_recommendation_filter_risk_warning_desc')"
+        right-width="auto"
+      >
+        <Radio v-model="settings.showRecommendationFilterRiskWarning" />
+      </SettingsItem>
       <SettingsItem :title="$t('settings.disable_filters_for_followed_users')" :desc="$t('settings.disable_filters_for_followed_users_desc')" right-width="auto">
         <Radio v-model="settings.disableFilterForFollowedUser" />
       </SettingsItem>
@@ -441,25 +451,20 @@ function handleToggleHomeTab(tab: any) {
       </div>
     </SettingsItemGroup>
 
-    <SettingsItemGroup :title="$t('settings.group_following')">
+    <SettingsItemGroup
+      :title="$t('settings.group_following')"
+      :desc="$t('settings.group_following_desc')"
+    >
       <SettingsItem :title="$t('settings.use_following_new_layout')" :desc="$t('settings.use_following_new_layout_desc')" right-width="auto">
         <Radio v-model="settings.useFollowingNewLayout" />
       </SettingsItem>
-      <SettingsItem :title="$t('settings.enable_following_inactive_blacklist')" :desc="$t('settings.enable_following_inactive_blacklist_desc')" right-width="auto">
-        <Radio v-model="settings.enableFollowingInactiveBlacklist" />
+      <SettingsItem :title="$t('settings.following_sort')" right-width="auto">
+        <SettingsSegmentedControl
+          v-model="settings.followingUploaderSort"
+          :label="$t('settings.following_sort')"
+          :options="followingUploaderSortOptions"
+        />
       </SettingsItem>
-      <template v-if="settings.enableFollowingInactiveBlacklist">
-        <SettingsItem :title="$t('settings.following_inactive_days')" :desc="$t('settings.following_inactive_days_desc')" right-width="auto">
-          <Input
-            v-model="settings.followingInactiveDays" type="number" :min="1" :max="365"
-            w-120px
-          >
-            <template #suffix>
-              <span text="sm $bew-text-2" whitespace-nowrap>{{ $t('common.days') }}</span>
-            </template>
-          </Input>
-        </SettingsItem>
-      </template>
       <SettingsItem :title="$t('settings.following_tab_show_livestreaming_videos')" right-width="auto">
         <Radio v-model="settings.followingTabShowLivestreamingVideos" />
       </SettingsItem>
@@ -469,86 +474,6 @@ function handleToggleHomeTab(tab: any) {
       <SettingsItem :title="$t('settings.following_filter_dynamic_videos')" :desc="$t('settings.following_filter_dynamic_videos_desc')" right-width="auto">
         <Radio v-model="settings.followingFilterDynamicVideos" />
       </SettingsItem>
-    </SettingsItemGroup>
-
-    <SettingsItemGroup
-      :title="$t('settings.group_home_tabs')"
-    >
-      <SettingsItem :desc="$t('settings.home_tabs_adjustment_desc')" right-width="auto">
-        <template #title>
-          <div flex="~ gap-4 items-center">
-            {{ $t('settings.home_tabs_adjustment') }}
-            <Button size="small" type="secondary" @click="resetHomeTabs">
-              <template #left>
-                <div i-mingcute:back-line />
-              </template>
-              {{ $t('common.operation.reset') }}
-            </Button>
-          </div>
-        </template>
-
-        <template #bottom>
-          <draggable
-            v-model="settings.homePageTabVisibilityList"
-            item-key="page"
-            :component-data="{ style: 'display: flex; gap: 0.5rem; flex-wrap: wrap;' }"
-          >
-            <template #item="{ element }">
-              <div
-                flex="~ gap-2 items-center" p="x-4 y-2" bg="$bew-fill-1" rounded="$bew-radius" cursor-all-scroll
-                duration-300
-                :style="{
-                  background: element.visible ? 'var(--bew-theme-color-20)' : 'var(--bew-fill-1)',
-                  color: element.visible ? 'var(--bew-theme-color)' : 'var(--bew-text-1)',
-                }"
-                @click="handleToggleHomeTab(element)"
-              >
-                {{ $t(mainStore.homeTabs.find(tab => tab.page === element.page)?.i18nKey ?? '') }}
-              </div>
-            </template>
-          </draggable>
-        </template>
-      </SettingsItem>
-      <SettingsItem :title="$t('settings.fixed_home_tabs_on_home_page')" right-width="auto">
-        <Radio v-model="settings.fixedHomeTabsOnHomePage" />
-      </SettingsItem>
-    </SettingsItemGroup>
-
-    <SettingsItemGroup :title="$t('settings.group_search_page_mode')">
-      <SettingsItem :title="$t('settings.use_search_page_mode')" right-width="auto">
-        <Radio v-model="settings.useSearchPageModeOnHomePage" />
-      </SettingsItem>
-      <template v-if="settings.useSearchPageModeOnHomePage">
-        <SettingsItem :title="$t('settings.settings_shared_with_the_search_page')" right-width="auto">
-          <template #desc>
-            <span color="$bew-warning-color">{{ $t('settings.settings_shared_with_the_search_page_desc') }}</span>
-          </template>
-          <Button type="secondary" center @click="showSearchPageModeSharedSettings = true">
-            {{ $t('settings.btn.open_settings') }}
-          </Button>
-
-          <Dialog
-            v-if="showSearchPageModeSharedSettings"
-            width="80%"
-            max-width="900px"
-            content-height="64vh"
-            :show-footer="false"
-            :title="$t('settings.settings_shared_with_the_search_page')"
-            append-to-bewly-body
-            @close="showSearchPageModeSharedSettings = false"
-          >
-            <template #desc>
-              <span color="$bew-warning-color">{{ $t('settings.settings_shared_with_the_search_page_desc') }}</span>
-            </template>
-
-            <SearchPage />
-          </Dialog>
-        </SettingsItem>
-
-        <SettingsItem :title="$t('settings.search_page_mode_wallpaper_fixed')" right-width="auto">
-          <Radio v-model="settings.searchPageModeWallpaperFixed" />
-        </SettingsItem>
-      </template>
     </SettingsItemGroup>
   </div>
 </template>
@@ -562,18 +487,6 @@ function handleToggleHomeTab(tab: any) {
   :deep(.right-content) {
     --uno: w-auto;
   }
-}
-
-.recommendation-mode-selector {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  width: 300px;
-}
-
-.recommendation-mode-option {
-  min-width: 0;
-  padding-inline: 0.5rem;
-  white-space: nowrap;
 }
 
 .filter-control {

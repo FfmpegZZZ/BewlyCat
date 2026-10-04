@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { useI18n } from 'vue-i18n'
+
 import { WALLPAPERS } from '~/constants/imgs'
 import { localSettings, settings } from '~/logic'
 import { hasLocalWallpaper, isLocalWallpaperUrl, removeLocalWallpaper, resolveWallpaperUrl, storeLocalWallpaper } from '~/utils/localWallpaper'
@@ -6,18 +8,30 @@ import { compressAndResizeImage } from '~/utils/main'
 
 import SettingsItem from './SettingsItem.vue'
 import SettingsItemGroup from './SettingsItemGroup.vue'
+import SettingsSegmentedControl from './SettingsSegmentedControl.vue'
 
 const props = defineProps<Props>()
 
 interface Props {
   type: 'global' | 'searchPage'
 }
-const uploadWallpaperRef = ref(null)
+type WallpaperMode = 'buildIn' | 'byUrl'
+
+const { t } = useI18n()
+const uploadWallpaperRef = ref<HTMLInputElement | null>(null)
 
 const isGlobal = computed(() => props.type === 'global')
 const isBuildInWallpaper = computed(() => {
   return isGlobal.value ? settings.value.wallpaperMode === 'buildIn' : settings.value.searchPageWallpaperMode === 'buildIn'
 })
+const wallpaperMode = computed<WallpaperMode>({
+  get: () => isBuildInWallpaper.value ? 'buildIn' : 'byUrl',
+  set: changeWallpaperType,
+})
+const wallpaperModeOptions = computed<{ label: string, value: WallpaperMode }[]>(() => [
+  { label: t('settings.wallpaper_mode_opt.build_in'), value: 'buildIn' },
+  { label: t('settings.wallpaper_mode_opt.by_url'), value: 'byUrl' },
+])
 
 // 计算本地壁纸的实际显示URL
 const localWallpaperDisplayUrl = computed(() => {
@@ -75,12 +89,24 @@ function fileToBase64(inputFile: File) {
   })
 }
 
+function triggerUploadWallpaper() {
+  uploadWallpaperRef.value?.click()
+}
+
+function handleLocalWallpaperClick() {
+  const localWallpaperUrl = localSettings.value.locallyUploadedWallpaper?.url
+  if (localWallpaperUrl)
+    changeWallpaper(localWallpaperUrl)
+  else
+    triggerUploadWallpaper()
+}
+
 async function handleUploadWallpaper(e: Event) {
-  if (uploadWallpaperRef.value)
-    (uploadWallpaperRef.value as HTMLInputElement).click()
-  const file = (e.target as HTMLInputElement)?.files?.[0]
+  const input = e.target as HTMLInputElement
+  const file = input.files?.[0]
   if (!file)
     return
+  input.value = ''
 
   compressAndResizeImage(file, 2560, 1440, 0.9, async (compressedFile: File) => {
     try {
@@ -147,7 +173,7 @@ onMounted(() => {
   <SettingsItemGroup :title="$t('settings.group_wallpaper')">
     <SettingsItem v-if="!isGlobal" :title="$t('settings.individually_set_search_page_wallpaper')" right-width="auto">
       <template #desc>
-        <span color="$bew-warning-color">{{ $t('common.performance_impact_warn') }}</span>
+        <span class="bew-warning-text">{{ $t('common.performance_impact_warn') }}</span>
       </template>
 
       <Radio v-model="settings.individuallySetSearchPageWallpaper" />
@@ -155,28 +181,11 @@ onMounted(() => {
 
     <template v-if="isGlobal || (settings.individuallySetSearchPageWallpaper && !isGlobal)">
       <SettingsItem :title="$t('settings.wallpaper_mode')" :desc="$t('settings.wallpaper_mode_desc')" right-width="auto">
-        <div w="220px" flex rounded="$bew-radius" bg="$bew-fill-1" p-1>
-          <div
-            flex-1 py-1 cursor-pointer text-center rounded="$bew-radius"
-            :style="{
-              background: isBuildInWallpaper ? 'var(--bew-theme-color)' : '',
-              color: isBuildInWallpaper ? 'white' : '',
-            }"
-            @click="changeWallpaperType('buildIn')"
-          >
-            {{ $t('settings.wallpaper_mode_opt.build_in') }}
-          </div>
-          <div
-            flex-1 py-1 cursor-pointer text-center rounded="$bew-radius"
-            :style="{
-              background: !isBuildInWallpaper ? 'var(--bew-theme-color)' : '',
-              color: !isBuildInWallpaper ? 'white' : '',
-            }"
-            @click="changeWallpaperType('byUrl')"
-          >
-            {{ $t('settings.wallpaper_mode_opt.by_url') }}
-          </div>
-        </div>
+        <SettingsSegmentedControl
+          v-model="wallpaperMode"
+          :label="$t('settings.wallpaper_mode')"
+          :options="wallpaperModeOptions"
+        />
       </SettingsItem>
 
       <!-- 缓存时间设置 - 对所有URL壁纸生效 -->
@@ -216,17 +225,19 @@ onMounted(() => {
         <template #bottom>
           <div grid="~ xl:cols-5 lg:cols-4 cols-3 gap-4">
             <picture
+              class="bew-settings-option--lift"
               aspect-video bg="$bew-fill-1" rounded="$bew-radius" overflow-hidden
               un-border="4 transparent" cursor-pointer
               grid place-items-center
               :class="{ 'selected-wallpaper': isGlobal ? settings.wallpaper === '' : settings.searchPageWallpaper === '' }"
               @click="changeWallpaper('')"
             >
-              <div i-tabler:photo-off text="3xl $bew-text-3" />
+              <div i-tabler:photo-off text="size-$bew-icon-size-xl $bew-text-3" />
             </picture>
 
             <Tooltip v-for="item in WALLPAPERS" :key="item.url" placement="top" :content="item.name" aspect-video>
               <picture
+                class="bew-settings-option--lift"
                 aspect-video bg="$bew-fill-1" rounded="$bew-radius" overflow-hidden
                 un-border="4 transparent" w-full
                 :class="{ 'selected-wallpaper': isGlobal ? settings.wallpaper === item.url : settings.searchPageWallpaper === item.url }"
@@ -250,25 +261,26 @@ onMounted(() => {
               >
 
               <picture
-                class="group"
+                class="group bew-settings-option--lift"
                 :class="{ 'selected-wallpaper': isGlobal
-                  ? settings.wallpaper === (localWallpaperDisplayUrl || localSettings.locallyUploadedWallpaper?.url)
-                  : settings.searchPageWallpaper === (localWallpaperDisplayUrl || localSettings.locallyUploadedWallpaper?.url) }"
+                  ? settings.wallpaper === localSettings.locallyUploadedWallpaper?.url
+                  : settings.searchPageWallpaper === localSettings.locallyUploadedWallpaper?.url }"
                 aspect-video bg="$bew-fill-1" rounded="$bew-radius" overflow-hidden
                 un-border="4 transparent" w-full
                 flex="~ items-center justify-center"
-                @click="changeWallpaper(localWallpaperDisplayUrl || localSettings.locallyUploadedWallpaper?.url || '')"
+                @click="handleLocalWallpaperClick"
               >
                 <div
                   v-if="localSettings.locallyUploadedWallpaper"
                   class="opacity-0 group-hover:opacity-100" duration-300
-                  pos="absolute top-4px right-4px" z-1 text="14px" flex="~ gap-1"
+                  pos="absolute top-1 right-1" z-1 flex="~ gap-1"
+                  :style="{ fontSize: 'var(--bew-font-size-control)', lineHeight: 'var(--bew-line-height-control)' }"
                 >
                   <button
                     style="backdrop-filter: var(--bew-filter-glass-1);"
                     bg="$bew-content" rounded-full w-28px h-28px
                     grid place-items-center
-                    @click="handleUploadWallpaper"
+                    @click.stop="triggerUploadWallpaper"
                   >
                     <i i-mingcute:edit-2-line />
                   </button>
@@ -276,7 +288,7 @@ onMounted(() => {
                     style="backdrop-filter: var(--bew-filter-glass-1);"
                     bg="$bew-content" rounded-full w-28px h-28px
                     grid place-items-center
-                    @click="handleRemoveCustomWallpaper"
+                    @click.stop="handleRemoveCustomWallpaper"
                   >
                     <i i-mingcute:delete-2-line />
                   </button>
@@ -284,11 +296,10 @@ onMounted(() => {
                 <div
                   v-if="!localSettings.locallyUploadedWallpaper"
                   absolute w-full h-full grid place-items-center
-                  @click="handleUploadWallpaper"
                 >
                   <div
                     i-tabler:photo-up
-                    text="3xl $bew-text-3"
+                    text="size-$bew-icon-size-xl $bew-text-3"
                   />
                 </div>
                 <img
@@ -330,7 +341,7 @@ onMounted(() => {
 
       <SettingsItem :title="$t('settings.enable_wallpaper_masking')" right-width="auto">
         <template #desc>
-          <span color="$bew-warning-color">{{ $t('common.performance_impact_warn') }}</span>
+          <span class="bew-warning-text">{{ $t('common.performance_impact_warn') }}</span>
         </template>
 
         <Radio v-if="isGlobal" v-model="settings.enableWallpaperMasking" />

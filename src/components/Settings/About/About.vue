@@ -1,79 +1,144 @@
 <script setup lang="ts">
 import { useI18n } from 'vue-i18n'
+import { useToast } from 'vue-toastification'
 import browser from 'webextension-polyfill'
 
-import { originalSettings, settings } from '~/logic'
+import Button from '~/components/Button.vue'
+import Dialog from '~/components/Dialog.vue'
+import Radio from '~/components/Radio.vue'
+import { useSettingsCloudSyncPreference } from '~/composables/useSettingsCloudSyncPreference'
+import { settings } from '~/logic'
+import { getBrowserInfo, parseBrowserInfo } from '~/utils/browserInfo'
+import { sendMessage } from '~/utils/messaging'
+import type { SettingsCloudSyncEnableResponse, SettingsCloudSyncStatus } from '~/utils/settingsCloudSyncProtocol'
+import {
+  SETTINGS_CLOUD_SYNC_ENABLE_MESSAGE,
+  SETTINGS_CLOUD_SYNC_STATUS_MESSAGE,
+} from '~/utils/settingsCloudSyncProtocol'
 
 import { version } from '../../../../package.json'
+import Maintenance from '../Advanced/Maintenance.vue'
+import SettingsItem from '../components/SettingsItem.vue'
+import SettingsItemGroup from '../components/SettingsItemGroup.vue'
+import SettingsSectionHeading from '../components/SettingsSectionHeading.vue'
 
-const { t } = useI18n()
-
-const importSettingsRef = ref<HTMLElement>()
 const hasNewVersion = ref<boolean>(false)
+const contributorsImageFailed = ref(false)
+const contributorsImageUsingCloud = ref(false)
+const contributorsImageSrc = ref(browser.runtime.getURL('/assets/contributors.svg'))
+const settingsCloudSyncPreference = useSettingsCloudSyncPreference()
+const browserInfo = ref(parseBrowserInfo())
+const isCopyingEnvironmentInfo = ref(false)
+const showSyncConflictDialog = ref(false)
+const isSyncToggling = ref(false)
+// The switch stays visually checked while the direction dialog is open because
+// the underlying preference has not been written yet. Bumping this key
+// remounts the switch so it snaps back off when enabling is cancelled.
+const syncSwitchRenderTick = ref(0)
+const pendingEnableChoice = ref(false)
+const { t } = useI18n()
+const toast = useToast()
 
 const isDev = computed((): boolean => import.meta.env.DEV)
 
-onMounted(() => {
+onMounted(async () => {
   checkGitHubRelease()
+  browserInfo.value = await getBrowserInfo()
 })
 
-function handleImportSettings() {
-  if (importSettingsRef.value) {
-    importSettingsRef.value.click()
+function revertSyncSwitch() {
+  syncSwitchRenderTick.value++
+}
 
-    const handleChange = (event: Event) => {
-      const input = event.target as HTMLInputElement
-      if (input.files && input.files.length > 0) {
-        // A file has been selected
-        const selectedFile = input.files[0]
-        // Clear all previous file contents
-        input.value = ''
+function handleSyncToggle(value: boolean) {
+  if (!value) {
+    settingsCloudSyncPreference.value = false
+    return
+  }
+  void requestEnableSettingsCloudSync()
+}
 
-        const reader = new FileReader()
-        reader.onload = (event: Event) => {
-          const fileReaderTarget = event.target as FileReader
-          const fileContent = fileReaderTarget.result as string
-          const jsonObject = JSON.parse(fileContent) as any
+async function sendEnableSettingsCloudSyncRequest(mode: 'auto' | 'pull' | 'push') {
+  // The background runs the first coordination inline and reports the outcome;
+  // the switch state mirrors back through storage.onChanged only on success.
+  const response = await sendMessage<{ mode: 'auto' | 'pull' | 'push' }, SettingsCloudSyncEnableResponse>(
+    SETTINGS_CLOUD_SYNC_ENABLE_MESSAGE,
+    { mode },
+  )
+  if (!response)
+    throw new Error('Missing settings cloud sync bootstrap response')
+  if (!response.ok && response.reason === 'initialization-failed')
+    throw new Error('Settings cloud sync bootstrap failed')
+  return response.ok
+}
 
-          // Merge the new settings with the existing settings
-          Object.keys(jsonObject).forEach((key) => {
-            if (key in settings.value)
-              (settings.value as any)[key] = jsonObject[key]
-          })
+async function requestEnableSettingsCloudSync() {
+  if (isSyncToggling.value)
+    return
 
-          importSettingsRef.value?.removeEventListener('change', handleChange)
-        }
-        reader.readAsText(selectedFile)
-      }
+  isSyncToggling.value = true
+  let failedPhase: 'status' | 'enable' = 'status'
+  try {
+    const status = await sendMessage<undefined, SettingsCloudSyncStatus>(SETTINGS_CLOUD_SYNC_STATUS_MESSAGE)
+    if (!status)
+      throw new Error('Missing cloud sync status response')
+
+    if (status.state === 'compatible') {
+      // Cloud already holds a snapshot: let the user pick which side takes
+      // precedence instead of silently overwriting one of them.
+      showSyncConflictDialog.value = true
+      return
     }
 
-    importSettingsRef.value.addEventListener('change', handleChange)
+    if (status.state === 'incompatible') {
+      // The snapshot was written by a newer extension version; enabling here
+      // would corrupt it.
+      revertSyncSwitch()
+      toast.error(t('settings.sync_cloud_incompatible'))
+      return
+    }
+
+    failedPhase = 'enable'
+    if (!await sendEnableSettingsCloudSyncRequest('auto')) {
+      revertSyncSwitch()
+      toast.error(t('settings.sync_cloud_incompatible'))
+    }
+  }
+  catch (error) {
+    console.error(error)
+    revertSyncSwitch()
+    toast.error(t(failedPhase === 'status'
+      ? 'settings.sync_cloud_status_failed'
+      : 'settings.sync_cloud_enable_failed'))
+  }
+  finally {
+    isSyncToggling.value = false
   }
 }
 
-function handleExportSettings() {
-  const jsonStr = JSON.stringify(settings.value, null, 2) // Pretty print JSON
-  const blob = new Blob([jsonStr], { type: 'application/json' })
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  const date = new Date()
-  const dateTimeStr = date.toLocaleString('sv-SE').replace(/[- :]/g, '')
-
-  a.href = url
-  a.download = `bewly-settings-${dateTimeStr}.json`
-  a.click()
-  URL.revokeObjectURL(url)
+async function enableSyncWithMode(mode: 'pull' | 'push') {
+  pendingEnableChoice.value = true
+  showSyncConflictDialog.value = false
+  try {
+    if (!await sendEnableSettingsCloudSyncRequest(mode)) {
+      revertSyncSwitch()
+      toast.error(t('settings.sync_cloud_incompatible'))
+    }
+  }
+  catch (error) {
+    console.error(error)
+    revertSyncSwitch()
+    toast.error(t('settings.sync_cloud_enable_failed'))
+  }
+  finally {
+    pendingEnableChoice.value = false
+  }
 }
 
-function handleResetSettings() {
-  const result = confirm(
-    t('settings.reset_settings_confirm'),
-  )
-  if (result) {
-    // Remember the last selected language when resetting settings
-    originalSettings.language = settings.value.language
-    settings.value = originalSettings
-  }
+function handleSyncDialogClose() {
+  showSyncConflictDialog.value = false
+  if (!pendingEnableChoice.value && settingsCloudSyncPreference.value !== true)
+    revertSyncSwitch()
 }
 
 async function checkGitHubRelease() {
@@ -96,11 +161,45 @@ async function checkGitHubRelease() {
   catch {
   }
 }
+
+function handleContributorImageError() {
+  if (!contributorsImageUsingCloud.value) {
+    contributorsImageUsingCloud.value = true
+    contributorsImageSrc.value = 'https://contrib.rocks/image?repo=keleus/BewlyCat'
+    return
+  }
+
+  contributorsImageFailed.value = true
+}
+
+async function handleCopyEnvironmentInfo() {
+  if (isCopyingEnvironmentInfo.value)
+    return
+
+  const unknownValue = t('settings.environment_info_unknown')
+  const text = [
+    `- ${t('settings.environment_browser')}: ${browserInfo.value.name ?? unknownValue}`,
+    `- ${t('settings.environment_browser_version')}: ${browserInfo.value.version ?? unknownValue}`,
+    `- ${t('settings.environment_bewlycat_version')}: ${version}`,
+  ].join('\n')
+
+  isCopyingEnvironmentInfo.value = true
+  try {
+    await navigator.clipboard.writeText(text)
+    toast.success(t('settings.environment_info_copied'))
+  }
+  catch {
+    toast.error(t('settings.environment_info_copy_failed'))
+  }
+  finally {
+    isCopyingEnvironmentInfo.value = false
+  }
+}
 </script>
 
 <template>
-  <div>
-    <div max-w-800px mx-auto>
+  <div :data-settings-title="$t('settings.menu_about')">
+    <div class="about-content">
       <div relative w-200px m-auto>
         <img
           :src="`${browser.runtime.getURL('/assets/icon-512.png')}`" alt="" width="200"
@@ -110,17 +209,18 @@ async function checkGitHubRelease() {
           v-if="hasNewVersion"
           href="https://github.com/keleus/BewlyCat/releases" target="_blank"
           pos="absolute bottom-0 right-0" transform="translate-x-50%" un-text="xs $bew-text-1" p="y-1 x-2" bg="$bew-fill-1"
-          rounded-12
+          rounded="$bew-radius"
         >
           NEW
         </a>
       </div>
-      <section text-2xl text-center mt-2>
-        <p flex="inline gap-2" fw-900>
+      <section class="about-brand" text-center mt-2>
+        <p flex="inline gap-2">
           <span>BewlyCat</span>
           <span
             v-if="isDev"
-            inline-block text="$bew-warning-color"
+            class="bew-warning-text"
+            inline-block
           >
             Dev
           </span>
@@ -135,10 +235,63 @@ async function checkGitHubRelease() {
         </p>
       </section>
 
+      <section class="about-maintenance">
+        <SettingsItemGroup :title="$t('settings.group_environment_info')">
+          <SettingsItem
+            :title="$t('settings.copy_environment_info')"
+            :desc="$t('settings.copy_environment_info_desc')"
+            right-width="auto"
+          >
+            <Button
+              type="secondary"
+              size="small"
+              :disabled="isCopyingEnvironmentInfo"
+              @click="handleCopyEnvironmentInfo"
+            >
+              <template #left>
+                <div i-tabler:copy />
+              </template>
+              {{ $t('settings.copy_environment_info') }}
+            </Button>
+          </SettingsItem>
+        </SettingsItemGroup>
+
+        <SettingsItemGroup :title="$t('settings.group_settings_sync')">
+          <SettingsItem
+            :title="$t('settings.enable_settings_sync')"
+            :desc="$t('settings.enable_settings_sync_desc')"
+            right-width="auto"
+          >
+            <Radio
+              :key="syncSwitchRenderTick"
+              :model-value="settingsCloudSyncPreference === true"
+              :disabled="isSyncToggling"
+              @update:model-value="handleSyncToggle"
+            />
+          </SettingsItem>
+        </SettingsItemGroup>
+
+        <SettingsItemGroup :title="$t('settings.group_version_reminder')">
+          <SettingsItem
+            :title="$t('settings.enable_version_reminder')"
+            :desc="$t('settings.enable_version_reminder_desc')"
+            right-width="auto"
+          >
+            <Radio v-model="settings.enableVersionReminder" />
+          </SettingsItem>
+        </SettingsItemGroup>
+
+        <SettingsSectionHeading
+          class="maintenance-heading"
+          :title="$t('settings.maintenance.title')"
+          :desc="$t('settings.category_advanced_maintenance_desc')"
+          icon="i-mingcute:save-2-fill"
+        />
+        <Maintenance />
+      </section>
+
       <section
-        style="box-shadow: var(--bew-shadow-1), var(--bew-shadow-edge-glow-1);"
-        mt-6 p-4 bg="$bew-fill-alt" rounded="$bew-radius"
-        flex="~ col items-center gap-6"
+        class="about-info-card"
       >
         <section w-full>
           <h3 class="title">
@@ -167,64 +320,105 @@ async function checkGitHubRelease() {
               bg="#FF2442 dark:#D7223A !opacity-10 !hover:opacity-20"
               un-text="#FF2442 dark:#D7223A"
             >
-              <div i-tabler:book-2 /> 小红书
+              <div i-tabler:book-2 /> {{ t('settings.xiaohongshu') }}
             </a>
           </div>
         </section>
         <section w-full>
           <h3 class="title">
-            {{ `${$t('settings.import_settings')} / ${$t('settings.export_settings')} / ${$t('settings.reset_settings')}` }}
+            {{ $t('settings.current_contributors') }}
           </h3>
-          <div flex="~ gap-2">
-            <Button class="btn" @click="handleImportSettings">
-              <template #left>
-                <div i-uil:import />
-              </template>
-              <input ref="importSettingsRef" type="file" accept=".json" hidden>
-              {{ $t('settings.import_settings') }}
-            </Button>
-            <Tooltip placement="bottom" :content="$t('settings.export_settings_desc')">
-              <Button class="btn" @click="handleExportSettings">
-                <template #left>
-                  <div i-uil:export />
-                </template>
-                {{ $t('settings.export_settings') }}
-              </Button>
-            </Tooltip>
-            <Button class="btn" @click="handleResetSettings">
-              <template #left>
-                <i i-mingcute:back-line />
-              </template>
-              {{ $t('settings.reset_settings') }}
-            </Button>
-          </div>
-        </section>
-        <section>
-          <h3 class="title">
-            {{ $t('settings.contributors') }}
-          </h3>
+          <p v-if="contributorsImageFailed" class="contributors-error">
+            {{ $t('settings.contributors_image_failed') }}
+          </p>
           <a
-            href="https://github.com/hakadao/BewlyBewly/graphs/contributors" target="_blank"
+            v-else
+            href="https://github.com/keleus/BewlyCat/graphs/contributors"
+            target="_blank"
+            class="contributors-image-link"
           >
             <img
-              src="https://contrib.rocks/image?repo=hakadao/BewlyBewly"
-              w-full
+              :src="contributorsImageSrc"
+              :alt="$t('settings.current_contributors')"
+              loading="lazy"
+              @error="handleContributorImageError"
             >
           </a>
         </section>
       </section>
     </div>
+
+    <Dialog
+      v-if="showSyncConflictDialog"
+      :title="t('settings.sync_cloud_conflict_title')"
+      width="440px"
+      :show-footer="false"
+      append-to-bewly-body
+      @close="handleSyncDialogClose"
+    >
+      <div class="sync-conflict-body" flex="~ col gap-3">
+        <p text="$bew-text-2 sm">
+          {{ t('settings.sync_cloud_conflict_desc') }}
+        </p>
+        <Button type="primary" @click="enableSyncWithMode('pull')">
+          {{ t('settings.sync_cloud_use_cloud') }}
+        </Button>
+        <Button type="secondary" @click="enableSyncWithMode('push')">
+          {{ t('settings.sync_cloud_use_local') }}
+        </Button>
+      </div>
+    </Dialog>
   </div>
 </template>
 
 <style lang="scss" scoped>
-.btn {
-  --b-button-color: var(--bew-fill-1);
-  --b-button-color-hover: var(--bew-fill-2);
+.title {
+  --uno: "mb-2";
+  font-weight: var(--bew-font-weight-bold);
 }
 
-.title {
-  --uno: "fw-bold mb-2";
+.about-brand {
+  margin-top: var(--bew-space-2);
+  font-size: var(--bew-font-size-display);
+  font-weight: var(--bew-font-weight-bold);
+  line-height: var(--bew-line-height-data);
+}
+
+.about-info-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--bew-space-6);
+  margin: var(--bew-space-6) calc(var(--bew-space-4) * -1) 0;
+  padding: var(--bew-space-4);
+  background: var(--bew-fill-alt);
+  border-radius: var(--bew-panel-radius);
+  box-shadow: var(--bew-shadow-1), var(--bew-shadow-edge-glow-1);
+}
+
+.contributors-image-link {
+  display: block;
+
+  img {
+    display: block;
+    max-width: 100%;
+    height: auto;
+  }
+}
+
+.about-maintenance {
+  margin-top: var(--bew-space-6);
+}
+
+.maintenance-heading {
+  margin-top: var(--bew-space-8);
+}
+
+.contributors-error {
+  padding: var(--bew-space-4);
+  color: var(--bew-error-color);
+  text-align: center;
+  background: var(--bew-fill-1);
+  border-radius: var(--bew-panel-radius);
 }
 
 .link-card {

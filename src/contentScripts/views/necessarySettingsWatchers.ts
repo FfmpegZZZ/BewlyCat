@@ -4,7 +4,7 @@ import { IFRAME_TOP_BAR_CHANGE } from '~/constants/globalEvents'
 import { setUselessFeedCardBlockerEnabled, shouldEnableUselessFeedCardBlocker } from '~/contentScripts/features/blockUselessFeedCards'
 import { LanguageType } from '~/enums/appEnums'
 import { appAuthTokens, FROSTED_GLASS_BLUR_MAX_PX, FROSTED_GLASS_BLUR_MIN_PX, localSettings, originalSettings, settings } from '~/logic'
-import { resetBilibiliTopBarInlineStyles, setOriginalBilibiliTopBarScrolled } from '~/utils/bilibiliTopBar'
+import { detachOriginalBilibiliTopBar, ensureOriginalBilibiliTopBarAppended, resetBilibiliTopBarInlineStyles, setOriginalBilibiliTopBarScrolled, shouldShowOriginalBilibiliTopBar } from '~/utils/bilibiliTopBar'
 import { cleanBilibiliShareText, getUserID, injectCSS, isHomePage, isInIframe, isVideoPlaybackPage } from '~/utils/main'
 
 function isFestivalPage(): boolean {
@@ -13,7 +13,6 @@ function isFestivalPage(): boolean {
 
 export function setupNecessarySettingsWatchers() {
   const { locale } = useI18n()
-  let syncingTopBarSettings = false
   let lastBewlyDesignHref = location.href
 
   const DEFAULT_FROSTED_GLASS_BLUR_PX = originalSettings.frostedGlassBlurIntensity
@@ -26,12 +25,6 @@ export function setupNecessarySettingsWatchers() {
     return Math.min(FROSTED_GLASS_BLUR_MAX_PX, Math.max(FROSTED_GLASS_BLUR_MIN_PX, value))
   }
 
-  // Chromium routes videos through a different compositor path when a page uses
-  // backdrop filters. In compatibility mode, avoid that path on playback pages
-  // so NVIDIA RTX Video Enhancement can process the video.
-  const isFrostedGlassActive = () => settings.value.enableFrostedGlass
-    && !(settings.value.nvidiaRtxVideoEnhancementCompatibility && isVideoPlaybackPage())
-
   const applyFrostedGlassBlur = (rawValue: number) => {
     const clampedValue = clampFrostedGlassBlur(rawValue)
     const bewlyElement = document.querySelector('#bewly') as HTMLElement | null
@@ -40,7 +33,7 @@ export function setupNecessarySettingsWatchers() {
     if (bewlyElement)
       targets.push(bewlyElement)
 
-    if (!isFrostedGlassActive()) {
+    if (!settings.value.enableFrostedGlass) {
       targets.forEach((element) => {
         element.style.removeProperty('--bew-filter-glass-1')
         element.style.removeProperty('--bew-filter-glass-2')
@@ -66,7 +59,7 @@ export function setupNecessarySettingsWatchers() {
 
   const applyFrostedGlassState = () => {
     const bewlyElement = document.querySelector('#bewly') as HTMLElement | null
-    const shouldDisable = !isFrostedGlassActive()
+    const shouldDisable = !settings.value.enableFrostedGlass
 
     bewlyElement?.classList.toggle('disable-frosted-glass', shouldDisable)
     document.documentElement.classList.toggle('disable-frosted-glass', shouldDisable)
@@ -118,6 +111,8 @@ export function setupNecessarySettingsWatchers() {
   watch(
     [() => settings.value.customizeFont, () => settings.value.fontFamily],
     () => {
+      const bewlyHost = document.getElementById('bewly')
+
       if (typeof settings.value.customizeFont === 'boolean')
         settings.value.customizeFont = 'recommend'
 
@@ -133,12 +128,15 @@ export function setupNecessarySettingsWatchers() {
       // Under default settings, revert to Bilibili's original font-family
       if (settings.value.customizeFont === 'default') {
         document.documentElement.classList.remove('modify-fonts')
+        bewlyHost?.classList.remove('modify-fonts')
       }
       else if (settings.value.customizeFont === 'recommend') {
         document.documentElement.classList.add('modify-fonts')
+        bewlyHost?.classList.add('modify-fonts')
       }
       else {
         document.documentElement.classList.add('modify-fonts')
+        bewlyHost?.classList.add('modify-fonts')
         document.documentElement.style.setProperty('--bew-custom-fonts', settings.value.fontFamily)
       }
     },
@@ -186,10 +184,7 @@ export function setupNecessarySettingsWatchers() {
   )
 
   watch(
-    [
-      () => settings.value.enableFrostedGlass,
-      () => settings.value.nvidiaRtxVideoEnhancementCompatibility,
-    ],
+    () => settings.value.enableFrostedGlass,
     applyFrostedGlassState,
     { immediate: true },
   )
@@ -232,6 +227,7 @@ export function setupNecessarySettingsWatchers() {
         blockAds: settings.value.blockAds,
         homePage: isHomePage(),
         inIframe: isInIframe(),
+        useOriginalBilibiliHomepage: settings.value.useOriginalBilibiliHomepage,
       }),
     )
   }
@@ -242,10 +238,32 @@ export function setupNecessarySettingsWatchers() {
       document.documentElement.classList.add('block-useless-contents')
     else
       document.documentElement.classList.remove('block-useless-contents')
-
-    // 使用 JS 标记首页信息流卡片，避免代价较高的 :has() 选择器。
-    refreshUselessFeedCardBlocker()
   }, { immediate: true })
+
+  // 只在原版首页标记卡片；切回自定义首页时释放监听器和待处理节点。
+  watch(
+    [() => settings.value.blockAds, () => settings.value.useOriginalBilibiliHomepage],
+    refreshUselessFeedCardBlocker,
+    { immediate: true },
+  )
+
+  watch(
+    [
+      () => settings.value.originalMomentsShowUserCard,
+      () => settings.value.originalMomentsShowLiveList,
+      () => settings.value.originalMomentsShowCommunityCenter,
+      () => settings.value.originalMomentsShowHotSearch,
+      () => settings.value.originalMomentsShowUpList,
+    ],
+    ([showUserCard, showLiveList, showCommunityCenter, showHotSearch, showUpList]) => {
+      document.documentElement.classList.toggle('moments-hide-original-user-card', !showUserCard)
+      document.documentElement.classList.toggle('moments-hide-original-live-list', !showLiveList)
+      document.documentElement.classList.toggle('moments-hide-original-community-center', !showCommunityCenter)
+      document.documentElement.classList.toggle('moments-hide-original-hot-search', !showHotSearch)
+      document.documentElement.classList.toggle('moments-hide-original-up-list', !showUpList)
+    },
+    { immediate: true },
+  )
 
   // iframe 内的原版页面同样可能通过 SPA 导航离开或返回首页。
   window.addEventListener('pushstate', refreshUselessFeedCardBlocker)
@@ -280,8 +298,6 @@ export function setupNecessarySettingsWatchers() {
     { immediate: true },
   )
 
-  let styleEL: HTMLStyleElement | null = null
-  let bewlyStyleEL: HTMLStyleElement | null = null
   watch(
     [() => localSettings.value.customizeCSS, () => localSettings.value.customizeCSSContent],
     () => {
@@ -297,11 +313,11 @@ export function setupNecessarySettingsWatchers() {
       })
 
       if (localSettings.value.customizeCSS) {
-        styleEL = injectCSS(localSettings.value.customizeCSSContent)
+        const styleEL = injectCSS(localSettings.value.customizeCSSContent)
         styleEL.setAttribute('data-bewly-customizeCSS', '')
 
         if (bewlyShadow) {
-          bewlyStyleEL = injectCSS(localSettings.value.customizeCSSContent, bewlyShadow)
+          const bewlyStyleEL = injectCSS(localSettings.value.customizeCSSContent, bewlyShadow)
           bewlyStyleEL.setAttribute('data-bewly-customizeCSS', '')
         }
       }
@@ -323,70 +339,75 @@ export function setupNecessarySettingsWatchers() {
   )
 
   watch(
-    () => settings.value.showTopBar,
-    (newVal) => {
-      // `showTopBar` is the Bewly top bar toggle. Keep `useOriginalBilibiliTopBar` in sync,
-      // but avoid ping-pong writes that can race in async storage.
-      if (syncingTopBarSettings)
-        return
+    () => settings.value.useOriginalBilibiliHomepage,
+    (useOriginalBilibiliHomepage) => {
+      // 只有外层 BewlyCat 自定义首页需要接管原版顶栏第二行，原版首页交还给 B 站或第三方顶栏控制。
+      const useBewlyHomepage = !isInIframe() && isHomePage() && !useOriginalBilibiliHomepage
+      document.documentElement.classList.toggle('bewly-custom-homepage', useBewlyHomepage)
 
-      const desiredUseOriginal = !newVal
-      if (settings.value.useOriginalBilibiliTopBar === desiredUseOriginal)
-        return
-
-      syncingTopBarSettings = true
-      settings.value.useOriginalBilibiliTopBar = desiredUseOriginal
-      syncingTopBarSettings = false
+      applyOuterTopBarPolicy()
     },
     { immediate: true },
   )
 
+  function isOriginalTopBarEnabled(): boolean {
+    return shouldShowOriginalBilibiliTopBar(settings.value.enableTopBar, settings.value.useOriginalBilibiliTopBar)
+  }
+
+  function applyDocumentTopBarClasses(doc: Document, shouldApplyRemoveTopBar: boolean) {
+    doc.documentElement.classList.toggle('remove-top-bar', shouldApplyRemoveTopBar)
+    // 顶栏可见性关闭时留给 Evolved 等第三方顶栏
+    doc.documentElement.classList.toggle('remove-custom-navbar', settings.value.enableTopBar)
+  }
+
+  function buildIframeTopBarMessage() {
+    return {
+      type: IFRAME_TOP_BAR_CHANGE,
+      useOriginalBilibiliTopBar: settings.value.useOriginalBilibiliTopBar,
+      enableTopBar: settings.value.enableTopBar,
+    }
+  }
+
+  function applyIframeDocumentTopBarClasses(iframeDoc: Document) {
+    applyDocumentTopBarClasses(iframeDoc, !isOriginalTopBarEnabled())
+    if (isOriginalTopBarEnabled())
+      resetBilibiliTopBarInlineStyles(iframeDoc)
+  }
+
+  function syncTopBarPreferenceToIframes() {
+    if (isInIframe())
+      return
+
+    const message = buildIframeTopBarMessage()
+    const iframeCandidates = new Set<HTMLIFrameElement>()
+    document.querySelectorAll<HTMLIFrameElement>('iframe').forEach(iframe => iframeCandidates.add(iframe))
+    document.getElementById('bewly')?.shadowRoot?.querySelectorAll<HTMLIFrameElement>('iframe').forEach(iframe => iframeCandidates.add(iframe))
+
+    iframeCandidates.forEach((iframe) => {
+      try {
+        // Prefer direct DOM access when same-origin, so it works even if the iframe didn't inject our content script.
+        const iframeDoc = iframe.contentWindow?.document
+        if (iframeDoc)
+          applyIframeDocumentTopBarClasses(iframeDoc)
+      }
+      catch {
+        // Ignore cross-origin / sandbox restrictions.
+      }
+
+      try {
+        iframe.contentWindow?.postMessage(message, '*')
+      }
+      catch {
+        // Ignore cross-origin / sandbox restrictions.
+      }
+    })
+  }
+
   watch(
-    () => settings.value.useOriginalBilibiliTopBar,
-    (newVal) => {
-      // `useOriginalBilibiliTopBar` is the source-of-truth for "which top bar to use".
-      // Sync `showTopBar` (Bewly top bar visible) with minimal writes.
-      const desiredShowTopBar = !newVal
-      if (!syncingTopBarSettings && settings.value.showTopBar !== desiredShowTopBar) {
-        syncingTopBarSettings = true
-        settings.value.showTopBar = desiredShowTopBar
-        syncingTopBarSettings = false
-      }
+    [() => settings.value.enableTopBar, () => settings.value.useOriginalBilibiliTopBar],
+    () => {
       applyOuterTopBarPolicy()
-
-      // Sync top bar visibility preference to embedded Bilibili iframes.
-      // WebExtension storage doesn't automatically sync reactive state across frames,
-      // so the iframe may not update until reload without this message.
-      if (!isInIframe()) {
-        const message = {
-          type: IFRAME_TOP_BAR_CHANGE,
-          useOriginalBilibiliTopBar: settings.value.useOriginalBilibiliTopBar,
-        }
-
-        const iframeCandidates = new Set<HTMLIFrameElement>()
-        document.querySelectorAll<HTMLIFrameElement>('iframe').forEach(iframe => iframeCandidates.add(iframe))
-        document.getElementById('bewly')?.shadowRoot?.querySelectorAll<HTMLIFrameElement>('iframe').forEach(iframe => iframeCandidates.add(iframe))
-
-        iframeCandidates.forEach((iframe) => {
-          try {
-            // Prefer direct DOM access when same-origin, so it works even if the iframe didn't inject our content script.
-            const iframeDoc = iframe.contentWindow?.document
-            iframeDoc?.documentElement?.classList.toggle('remove-top-bar', !settings.value.useOriginalBilibiliTopBar)
-            if (settings.value.useOriginalBilibiliTopBar && iframeDoc)
-              resetBilibiliTopBarInlineStyles(iframeDoc)
-          }
-          catch {
-            // Ignore cross-origin / sandbox restrictions.
-          }
-
-          try {
-            iframe.contentWindow?.postMessage(message, '*')
-          }
-          catch {
-            // Ignore cross-origin / sandbox restrictions.
-          }
-        })
-      }
+      syncTopBarPreferenceToIframes()
     },
     { immediate: true },
   )
@@ -401,6 +422,7 @@ export function setupNecessarySettingsWatchers() {
         applyOuterTopBarPolicy()
       })
       observer.observe(shadow, { childList: true, subtree: true, attributes: true, attributeFilter: ['src'] })
+      onScopeDispose(() => observer.disconnect())
     }
   }
 
@@ -425,18 +447,39 @@ export function setupNecessarySettingsWatchers() {
     { immediate: true },
   )
 
+  watch(
+    () => settings.value.hideCommentImageScrollbar,
+    (enabled) => {
+      document.documentElement.classList.toggle('bewly-hide-comment-image-scrollbar', enabled)
+    },
+    { immediate: true },
+  )
+
   const refreshBewlyDesignOnRouteChange = () => {
     if (lastBewlyDesignHref === location.href)
       return
 
     lastBewlyDesignHref = location.href
     applyBewlyDesignClasses()
-    applyFrostedGlassState()
   }
 
-  window.addEventListener('popstate', refreshBewlyDesignOnRouteChange)
-  window.addEventListener('hashchange', refreshBewlyDesignOnRouteChange)
-  window.setInterval(refreshBewlyDesignOnRouteChange, 800)
+  let bewlyDesignRefreshQueued = false
+  const scheduleBewlyDesignRefresh = () => {
+    if (bewlyDesignRefreshQueued)
+      return
+
+    bewlyDesignRefreshQueued = true
+    // MAIN-world history hooks emit before the native method updates the URL.
+    queueMicrotask(() => {
+      bewlyDesignRefreshQueued = false
+      refreshBewlyDesignOnRouteChange()
+    })
+  }
+
+  window.addEventListener('pushstate', scheduleBewlyDesignRefresh)
+  window.addEventListener('replacestate', scheduleBewlyDesignRefresh)
+  window.addEventListener('popstate', scheduleBewlyDesignRefresh)
+  window.addEventListener('hashchange', scheduleBewlyDesignRefresh)
 
   // Clean Share Link - intercept clipboard copy events
   let cleanShareLinkCopyHandler: ((e: ClipboardEvent) => void) | null = null
@@ -497,31 +540,37 @@ export function setupNecessarySettingsWatchers() {
     return Boolean(shadow.querySelector('iframe[src*="bilibili.com"]'))
   }
 
+  onScopeDispose(() => detachOriginalBilibiliTopBar(document))
+
   function applyOuterTopBarPolicy() {
-    if (isInIframe())
+    if (isInIframe()) {
+      applyDocumentTopBarClasses(document, !isOriginalTopBarEnabled())
+      if (isOriginalTopBarEnabled())
+        resetBilibiliTopBarInlineStyles(document)
       return
+    }
 
     // Handle homepage-specific logic
-    if (isHomePage()) {
+    if (isHomePage() && !settings.value.useOriginalBilibiliHomepage) {
       // When the homepage is showing an original Bilibili page inside our iframe (dock item "useOriginalBiliPage"),
       // we should keep the *outer* document's Bilibili top bar hidden to avoid double headers.
       const shouldHideOuterBiliTopBar = hasBiliIframePage()
+      const shouldShowOriginal = isOriginalTopBarEnabled()
 
-      const shouldApplyRemoveTopBar = !settings.value.useOriginalBilibiliTopBar || shouldHideOuterBiliTopBar
-      document.documentElement.classList.toggle('remove-top-bar', shouldApplyRemoveTopBar)
+      // 自定义首页下原版顶栏只挂在 body，不再回填 #app 做保活。
+      // 切回 Bewly 顶栏时用 remove-top-bar 隐藏即可，避免重新点亮原站首页 Vue 树。
+      if (shouldShowOriginal && !shouldHideOuterBiliTopBar)
+        ensureOriginalBilibiliTopBarAppended(document)
+      else
+        detachOriginalBilibiliTopBar(document)
 
-      const outerHeader = document.querySelector<HTMLElement>('.bili-header')
-      if (outerHeader) {
-        if (shouldHideOuterBiliTopBar)
-          outerHeader.style.display = 'none'
-        else
-          outerHeader.style.removeProperty('display')
-      }
+      const shouldApplyRemoveTopBar = !shouldShowOriginal || shouldHideOuterBiliTopBar
+      applyDocumentTopBarClasses(document, shouldApplyRemoveTopBar)
 
-      if (settings.value.useOriginalBilibiliTopBar && !shouldHideOuterBiliTopBar)
+      if (shouldShowOriginal && !shouldHideOuterBiliTopBar)
         resetBilibiliTopBarInlineStyles(document)
 
-      if (settings.value.useOriginalBilibiliTopBar && !shouldHideOuterBiliTopBar) {
+      if (shouldShowOriginal && !shouldHideOuterBiliTopBar) {
         const scrollTop = document.getElementById('bewly')
           ?.shadowRoot
           ?.querySelector<HTMLElement>('.bewly-scroll-viewport')
@@ -530,15 +579,10 @@ export function setupNecessarySettingsWatchers() {
       }
     }
     else {
-      // Handle non-homepage pages
-      document.documentElement.classList.toggle('remove-top-bar', !settings.value.useOriginalBilibiliTopBar)
-
-      // When switching to Bewly top bar, reset any inline styles that Bilibili might have added
-      if (!settings.value.useOriginalBilibiliTopBar)
-        resetBilibiliTopBarInlineStyles(document)
-      // When switching to original Bilibili top bar, also reset inline styles to ensure it's visible
-      else
-        resetBilibiliTopBarInlineStyles(document)
+      // 原版首页和其他原生页面只切换显隐，不搬移或改写顶栏。
+      detachOriginalBilibiliTopBar(document)
+      applyDocumentTopBarClasses(document, !isOriginalTopBarEnabled())
+      resetBilibiliTopBarInlineStyles(document)
     }
   }
 }

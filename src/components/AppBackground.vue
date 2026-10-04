@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import type { CSSProperties } from 'vue'
+
 import { useDark } from '~/composables/useDark'
 import { AppPage } from '~/enums/appEnums'
 import { settings } from '~/logic'
@@ -7,72 +9,158 @@ import { hexToHSL } from '~/utils/main'
 import { cleanupExpiredCache, getOrCacheWallpaper } from '~/utils/wallpaperCache'
 
 const props = defineProps<{ activatedPage: AppPage }>()
+const emit = defineEmits<{ wallpaperReady: [ready: boolean] }>()
 
 const { isDark } = useDark()
 
 // 组件挂载时清理过期缓存
 onMounted(() => {
   cleanupExpiredCache()
-  setAppWallpaperMaskingOpacity()
 })
 
 // 计算解析后的壁纸URL(支持本地壁纸和缓存控制)
 const resolvedWallpaper = ref('')
 const resolvedSearchPageWallpaper = ref('')
+function waitForWallpaperDecode(url: string, signal: AbortSignal): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) {
+      resolve()
+      return
+    }
+
+    const image = new Image()
+    let settled = false
+    let decoding = false
+
+    const cleanup = () => {
+      image.onload = null
+      image.onerror = null
+      signal.removeEventListener('abort', handleAbort)
+      image.removeAttribute('src')
+    }
+    function handleAbort() {
+      if (settled)
+        return
+
+      settled = true
+      cleanup()
+      resolve()
+    }
+    const handleLoad = async () => {
+      if (settled || decoding)
+        return
+
+      decoding = true
+      try {
+        await image.decode()
+      }
+      catch {
+        // load 已成功时仍允许展示；部分浏览器会对已解码图片拒绝重复 decode。
+      }
+      if (settled)
+        return
+
+      settled = true
+      cleanup()
+      resolve()
+    }
+    const handleError = () => {
+      if (settled)
+        return
+
+      settled = true
+      cleanup()
+      reject(new Error('Failed to load wallpaper'))
+    }
+
+    image.decoding = 'async'
+    image.onload = () => void handleLoad()
+    image.onerror = handleError
+    signal.addEventListener('abort', handleAbort, { once: true })
+    image.src = url
+
+    // data URL 或内存缓存可能在监听器注册后已经完成加载。
+    if (image.complete) {
+      if (image.naturalWidth > 0)
+        void handleLoad()
+      else
+        handleError()
+    }
+  })
+}
+
+async function resolveWallpaperSource(originalUrl: string, cacheTime: number): Promise<string> {
+  if (isLocalWallpaperUrl(originalUrl))
+    return resolveWallpaperUrl(originalUrl) || ''
+
+  return originalUrl ? await getOrCacheWallpaper(originalUrl, cacheTime) : ''
+}
 
 // 解析全局壁纸
-async function resolveGlobalWallpaper() {
+async function resolveGlobalWallpaper(signal: AbortSignal) {
   const originalUrl = settings.value.wallpaper
+  const resolvedUrl = await resolveWallpaperSource(originalUrl, settings.value.wallpaperCacheTime)
+  if (signal.aborted)
+    return
 
-  // 如果是本地壁纸,直接解析,不使用URL缓存
-  if (isLocalWallpaperUrl(originalUrl)) {
-    resolvedWallpaper.value = resolveWallpaperUrl(originalUrl) || ''
+  if (!resolvedUrl) {
+    resolvedWallpaper.value = ''
     return
   }
 
-  // 如果是普通URL,使用缓存控制
-  if (originalUrl) {
-    resolvedWallpaper.value = await getOrCacheWallpaper(originalUrl, settings.value.wallpaperCacheTime)
+  try {
+    await waitForWallpaperDecode(resolvedUrl, signal)
+    if (!signal.aborted)
+      resolvedWallpaper.value = resolvedUrl
   }
-  else {
-    resolvedWallpaper.value = ''
+  catch {
+    if (!signal.aborted)
+      resolvedWallpaper.value = ''
   }
 }
 
 // 解析搜索页壁纸
-async function resolveSearchWallpaper() {
+async function resolveSearchWallpaper(signal: AbortSignal) {
   const originalUrl = settings.value.searchPageWallpaper
+  const resolvedUrl = await resolveWallpaperSource(originalUrl, settings.value.searchPageWallpaperCacheTime)
+  if (signal.aborted)
+    return
 
-  // 如果是本地壁纸,直接解析,不使用URL缓存
-  if (isLocalWallpaperUrl(originalUrl)) {
-    resolvedSearchPageWallpaper.value = resolveWallpaperUrl(originalUrl) || ''
+  if (!resolvedUrl) {
+    resolvedSearchPageWallpaper.value = ''
     return
   }
 
-  // 如果是普通URL,使用缓存控制
-  if (originalUrl) {
-    resolvedSearchPageWallpaper.value = await getOrCacheWallpaper(originalUrl, settings.value.searchPageWallpaperCacheTime)
+  try {
+    await waitForWallpaperDecode(resolvedUrl, signal)
+    if (!signal.aborted)
+      resolvedSearchPageWallpaper.value = resolvedUrl
   }
-  else {
-    resolvedSearchPageWallpaper.value = ''
+  catch {
+    if (!signal.aborted)
+      resolvedSearchPageWallpaper.value = ''
   }
 }
 
-// 监听设置变化,重新解析壁纸
-watch(() => [settings.value.wallpaper, settings.value.wallpaperCacheTime], ([, newCacheTime], oldValue) => {
+// 逐项监听壁纸来源和缓存时间，避免无关设置触发大图重复加载、解码。
+watch([() => settings.value.wallpaper, () => settings.value.wallpaperCacheTime], ([, newCacheTime], oldValue, onCleanup) => {
+  const controller = new AbortController()
+  onCleanup(() => controller.abort())
   // 如果缓存时间改变,用新的缓存时间清理可能已过期的缓存
   if (oldValue && newCacheTime !== oldValue[1]) {
-    cleanupExpiredCache(newCacheTime as number)
+    cleanupExpiredCache(newCacheTime)
   }
-  resolveGlobalWallpaper()
+  void resolveGlobalWallpaper(controller.signal)
 }, { immediate: true })
 
-watch(() => [settings.value.searchPageWallpaper, settings.value.searchPageWallpaperCacheTime], ([, newCacheTime], oldValue) => {
+watch([() => settings.value.searchPageWallpaper, () => settings.value.searchPageWallpaperCacheTime], ([, newCacheTime], oldValue, onCleanup) => {
+  const controller = new AbortController()
+  onCleanup(() => controller.abort())
   // 如果缓存时间改变,用新的缓存时间清理可能已过期的缓存
   if (oldValue && newCacheTime !== oldValue[1]) {
-    cleanupExpiredCache(newCacheTime as number)
+    cleanupExpiredCache(newCacheTime)
   }
-  resolveSearchWallpaper()
+  void resolveSearchWallpaper(controller.signal)
 }, { immediate: true })
 
 // 计算当前页面使用的壁纸URL
@@ -81,6 +169,29 @@ const currentWallpaperUrl = computed(() => {
     return resolvedSearchPageWallpaper.value
   }
   return resolvedWallpaper.value
+})
+
+// 控件只在实际壁纸解码成功后使用融合底色，加载失败时仍保持普通页面的可读性。
+watch(currentWallpaperUrl, url => emit('wallpaperReady', Boolean(url)), { immediate: true })
+onBeforeUnmount(() => emit('wallpaperReady', false))
+
+const currentWallpaperBlurIntensity = computed(() => {
+  if (props.activatedPage === AppPage.Search && settings.value.individuallySetSearchPageWallpaper)
+    return settings.value.searchPageWallpaperBlurIntensity
+
+  return settings.value.wallpaperBlurIntensity
+})
+
+const wallpaperMaskStyle = computed((): CSSProperties => {
+  const wallpaperReady = Boolean(currentWallpaperUrl.value)
+  const blurIntensity = currentWallpaperBlurIntensity.value
+  const backdropFilter = wallpaperReady && blurIntensity > 0 ? `blur(${blurIntensity}px)` : 'none'
+
+  return {
+    visibility: wallpaperReady ? 'visible' : 'hidden',
+    backdropFilter,
+    WebkitBackdropFilter: backdropFilter,
+  }
 })
 
 const themeColorHsl = computed(() => {
@@ -120,13 +231,19 @@ watch(() => props.activatedPage, (newValue, oldValue) => {
 })
 
 function setAppWallpaperMaskingOpacity() {
-  const bewlyElement = document.querySelector('#bewly') as HTMLElement
+  const bewlyElement = document.querySelector<HTMLElement>('#bewly')
+  if (!bewlyElement)
+    return
+
   const isSearchPage = props.activatedPage === AppPage.Search
   if (settings.value.individuallySetSearchPageWallpaper && isSearchPage)
     bewlyElement.style.setProperty('--bew-homepage-bg-mask-opacity', `${settings.value.searchPageWallpaperMaskOpacity}%`)
   else
     bewlyElement.style.setProperty('--bew-homepage-bg-mask-opacity', `${settings.value.wallpaperMaskOpacity}%`)
 }
+
+// setup 阶段即写入遮罩透明度，避免首帧沿用 token 的 0 默认值。
+setAppWallpaperMaskingOpacity()
 </script>
 
 <template>
@@ -156,10 +273,8 @@ function setAppWallpaperMaskingOpacity() {
           <div
             v-if="(!settings.individuallySetSearchPageWallpaper && settings.enableWallpaperMasking) || (settings.searchPageEnableWallpaperMasking)"
             pos="absolute top-0 left-0" w-full h-full pointer-events-none bg="$bew-homepage-bg-mask"
-            duration-300 z--1
-            :style="{
-              backdropFilter: `blur(${settings.individuallySetSearchPageWallpaper ? settings.searchPageWallpaperBlurIntensity : settings.wallpaperBlurIntensity}px)`,
-            }"
+            z--1
+            :style="wallpaperMaskStyle"
           />
         </Transition>
       </div>
@@ -176,10 +291,8 @@ function setAppWallpaperMaskingOpacity() {
           <div
             v-if="settings.enableWallpaperMasking"
             pos="absolute top-0 left-0" w-full h-full pointer-events-none bg="$bew-homepage-bg-mask"
-            duration-300 z--1
-            :style="{
-              backdropFilter: `blur(${settings.wallpaperBlurIntensity}px)`,
-            }"
+            z--1
+            :style="wallpaperMaskStyle"
           />
         </Transition>
       </div>

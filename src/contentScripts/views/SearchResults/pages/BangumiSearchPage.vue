@@ -7,6 +7,7 @@ import Empty from '~/components/Empty.vue'
 import MediaEpisodeSelect from '~/components/MediaEpisodeSelect/MediaEpisodeSelect.vue'
 import SmoothLoading from '~/components/SmoothLoading.vue'
 import { useBewlyApp } from '~/composables/useAppProvider'
+import { SEARCH_PAGE_SIZES } from '~/constants/searchApi'
 import { settings } from '~/logic'
 import api from '~/utils/api'
 
@@ -130,10 +131,10 @@ async function performSearch(loadMore: boolean): Promise<boolean> {
 
   const success = await search(
     keyword,
-    params => api.search.searchBangumi(params),
+    (params, request) => api.search.searchBangumi(params, request),
     {
       page: targetPage,
-      pagesize: 30,
+      page_size: SEARCH_PAGE_SIZES.pgc,
     },
   )
 
@@ -193,15 +194,17 @@ async function handlePageChange(page: number) {
 
   const success = await search(
     keyword,
-    params => api.search.searchBangumi(params),
+    (params, request) => api.search.searchBangumi(params, request),
     {
       page,
-      pagesize: 30,
+      page_size: SEARCH_PAGE_SIZES.pgc,
     },
   )
 
-  if (!success || !lastResponse.value?.data)
+  if (!success || !lastResponse.value?.data) {
+    isPageChanging.value = false
     return
+  }
 
   const rawData = lastResponse.value.data
   const incomingList = Array.isArray(rawData?.result) ? rawData.result : []
@@ -271,21 +274,21 @@ defineExpose({
             </div>
           </a>
           <div class="bangumi-highlight-info">
-            <div class="bangumi-highlight-title" text="lg $bew-text-1" font-medium>
+            <div class="bangumi-highlight-title bew-card-title-text" text="$bew-text-1" font-medium>
               {{ bangumi.title }}
             </div>
             <div class="bangumi-highlight-meta" text="sm $bew-text-3" flex items-center gap-2>
               <span v-if="bangumi.score" text="$bew-theme-color" font-bold>
-                {{ bangumi.score?.toFixed(1) }} 分
+                {{ t('search.score', { score: bangumi.score?.toFixed(1) }) }}
               </span>
               <span v-if="bangumi.areas">
                 {{ bangumi.areas }}
               </span>
               <span v-if="bangumi.episodeCount">
-                共 {{ bangumi.episodeCount }} 话
+                {{ t('search.episode_count', { count: bangumi.episodeCount }) }}
               </span>
               <span v-if="bangumi.publishDateFormatted">
-                首播：{{ bangumi.publishDateFormatted }}
+                {{ t('search.first_aired', { date: bangumi.publishDateFormatted }) }}
               </span>
             </div>
             <div v-if="bangumi.desc" class="bangumi-highlight-desc">
@@ -309,15 +312,15 @@ defineExpose({
                 target="_blank"
                 @click.stop
               >
-                {{ bangumi.buttonText || '立即观看' }}
+                {{ bangumi.buttonText || t('search.watch_now') }}
               </a>
             </div>
           </div>
         </div>
       </div>
       <div v-if="bangumiGroups.movie.length" space-y-3>
-        <h3 text="lg $bew-text-1" font-medium>
-          其它
+        <h3 class="bew-section-heading" text="$bew-text-1">
+          {{ t('search.other') }}
         </h3>
         <div class="bangumi-highlight-grid">
           <div
@@ -340,12 +343,12 @@ defineExpose({
               </div>
             </a>
             <div class="bangumi-highlight-info">
-              <div class="bangumi-highlight-title" text="lg $bew-text-1" font-medium>
+              <div class="bangumi-highlight-title bew-card-title-text" text="$bew-text-1" font-medium>
                 {{ item.title }}
               </div>
               <div class="bangumi-highlight-meta" text="sm $bew-text-3" flex items-center gap-2>
                 <span v-if="item.score" text="$bew-theme-color" font-bold>
-                  {{ item.score?.toFixed(1) }} 分
+                  {{ t('search.score', { score: item.score?.toFixed(1) }) }}
                 </span>
                 <span v-if="item.areas">
                   {{ item.areas }}
@@ -372,7 +375,7 @@ defineExpose({
                   target="_blank"
                   @click.stop
                 >
-                  立即观看
+                  {{ t('search.watch_now') }}
                 </a>
               </div>
             </div>
@@ -437,7 +440,7 @@ defineExpose({
   gap: 1rem;
   padding: 1rem;
   background: var(--bew-elevated);
-  border-radius: var(--bew-radius);
+  border-radius: var(--bew-card-radius);
 }
 
 .bangumi-highlight-cover {
@@ -445,7 +448,7 @@ defineExpose({
   width: 160px;
   min-width: 160px;
   aspect-ratio: 3 / 4;
-  border-radius: calc(var(--bew-radius) - 4px);
+  border-radius: var(--bew-media-radius);
   overflow: hidden;
   position: relative;
 
@@ -461,10 +464,10 @@ defineExpose({
   top: 0.75rem;
   left: 0.75rem;
   padding: 0.25rem 0.5rem;
-  border-radius: 999px;
+  border-radius: var(--bew-badge-radius);
   background: rgba(0, 0, 0, 0.65);
   color: #fff;
-  font-size: 0.75rem;
+  font-size: var(--bew-font-size-control);
 }
 
 .bangumi-highlight-info {
@@ -475,9 +478,9 @@ defineExpose({
 }
 
 .bangumi-highlight-desc {
-  font-size: 0.875rem;
+  font-size: var(--bew-font-size-body);
   color: var(--bew-text-2);
-  line-height: 1.5;
+  line-height: var(--bew-line-height-body);
   display: -webkit-box;
   -webkit-line-clamp: 3;
   -webkit-box-orient: vertical;
@@ -491,10 +494,10 @@ defineExpose({
 
   span {
     padding: 0.25rem 0.5rem;
-    border-radius: 999px;
+    border-radius: var(--bew-badge-radius);
     background: var(--bew-fill-1);
     color: var(--bew-text-3);
-    font-size: 0.75rem;
+    font-size: var(--bew-font-size-control);
   }
 }
 
@@ -510,10 +513,12 @@ defineExpose({
   align-items: center;
   justify-content: center;
   padding: 0.5rem 1.25rem;
-  border-radius: var(--bew-radius-half);
+  min-height: var(--bew-control-height);
+  border-radius: var(--bew-interactive-radius);
   background: var(--bew-theme-color);
   color: #fff;
-  font-size: 0.875rem;
+  font-size: var(--bew-font-size-control);
+  font-weight: var(--bew-font-weight-semibold);
   text-decoration: none;
   transition: background-color 0.2s ease;
 

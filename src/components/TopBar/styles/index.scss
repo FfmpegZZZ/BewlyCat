@@ -1,16 +1,27 @@
+// 关闭毛玻璃时，常驻雾层会越过栏体再向下延伸 16px完成渐隐。
+// 雾层是绝对定位的，不撑高 .top-bar，因此退场位移需要额外包含这 16px。
+$top-bar-retract: calc(-1 * (var(--bew-top-bar-height) + var(--bew-space-4)));
+
 .top-bar-enter-active,
 .top-bar-leave-active {
-  transition: all 0.5s ease;
+  transition:
+    opacity var(--bew-duration-moderate, 300ms) var(--bew-ease-standard, ease),
+    transform var(--bew-duration-moderate, 300ms) var(--bew-ease-standard, ease);
 }
 
 .top-bar-enter-from,
 .top-bar-leave-to {
-  --uno: "opacity-0 transform -translate-y-full";
+  opacity: 0;
+  transform: translateY(#{$top-bar-retract});
 }
 
 .slide-in-enter-active,
 .slide-in-leave-active {
-  --uno: "transition-all duration-250 pointer-events-none";
+  transition:
+    opacity 250ms var(--bew-ease-standard, ease),
+    transform 250ms var(--bew-ease-standard, ease),
+    margin-top 250ms var(--bew-ease-standard, ease);
+  pointer-events: none;
 }
 
 .slide-in-leave-to,
@@ -20,17 +31,23 @@
 
 .slide-out-enter-active,
 .slide-out-leave-active {
-  --uno: "transition-all duration-300 pointer-events-none";
+  transition:
+    opacity var(--bew-duration-moderate, 300ms) var(--bew-ease-standard, ease),
+    transform var(--bew-duration-moderate, 300ms) var(--bew-ease-standard, ease);
+  pointer-events: none;
 }
 
 .slide-out-leave-to,
 .slide-out-enter-from {
   --uno: "transform important:-translate-y-4 opacity-0";
+  // 搜索框自带玻璃滤镜，出场/入场时把滤镜过渡到恒等值，
+  // 与 opacity 动画同步，避免 Chromium 丢弃 backdrop-filter 造成饱和度跳变（crbug.com/40877283）
+  --b-search-bar-glass: blur(0px) saturate(100%);
 }
 
 .fade-enter-active,
 .fade-leave-active {
-  --uno: "transition-all duration-600";
+  --uno: "transition-opacity duration-300";
 }
 
 .fade-leave-to,
@@ -39,7 +56,7 @@
 }
 
 .hide {
-  transform: translateY(-100%);
+  transform: translateY(#{$top-bar-retract});
 }
 
 :deep(.search-bar) {
@@ -55,6 +72,8 @@
   --uno: "after:opacity-100 after:w-full after:h-100px";
   --uno: "after:absolute after:top--30px after:left-1/2 after:-z-1";
   --uno: "after:transform after:-translate-x-1/2";
+  border-radius: var(--bew-popover-radius);
+  backdrop-filter: var(--bew-filter-glass-1);
 }
 
 .logo.activated {
@@ -67,7 +86,10 @@
 
 .right-side {
   .avatar {
-    --uno: "flex justify-center items-center relative z-1 rounded-1/2 w-46px h-46px";
+    --uno: "flex justify-center items-center relative z-1";
+    width: var(--bew-control-height);
+    height: var(--bew-control-height);
+    border-radius: var(--bew-control-radius);
 
     &:hover::after,
     &.hover::after {
@@ -76,10 +98,13 @@
 
     .avatar-img,
     .avatar-shadow {
-      --uno: "shrink-0 duration-300 rounded-1/2 w-34px h-34px bg-cover bg-center";
+      --uno: "shrink-0 duration-300 bg-cover bg-center";
+      width: var(--bew-control-height);
+      height: var(--bew-control-height);
+      border-radius: var(--bew-control-radius);
 
       &.hover {
-        --uno: "transform scale-230 translate-y-50px translate-x--36px";
+        --uno: "transform scale-195 translate-y-50px translate-x--36px";
       }
     }
 
@@ -102,6 +127,8 @@
     }
 
     .avatar-dot {
+      --uno: "top-0 right-0 z-10";
+
       &.hover {
         --uno: "transform scale-180 translate-y-35px translate-x--20px";
       }
@@ -109,15 +136,16 @@
   }
 
   .unread-num-dot {
-    --uno: "absolute top--2px right--4px";
-    --uno: "important:px-1 rounded-full";
+    // The controls grew from 34px to 36px; keep the badge on the same visual edge.
+    --uno: "absolute top--2px right--2px";
+    --uno: "important:px-1 rounded-$bew-badge-radius";
     --uno: "text-xs leading-none z-6 min-w-14px h-14px";
     --uno: "grid place-items-center";
     --uno: "bg-$bew-theme-color text-white shadow-$bew-shadow-1";
   }
 
   .unread-dot {
-    --uno: "w-8px h-8px bg-$bew-theme-color rounded-8px absolute right-2px top-2px";
+    --uno: "w-8px h-8px bg-$bew-theme-color rounded-$bew-badge-radius absolute right-2px top-2px";
   }
 
   .right-side-item {
@@ -125,20 +153,27 @@
 
     &:not(.avatar) a,
     & .notifications {
-      --uno: "text-lg grid place-items-center rounded-40px duration-300 relative z-5";
-      --uno: "h-34px w-34px";
+      --uno: "grid place-items-center duration-300 relative z-5";
+      width: var(--bew-control-height);
+      height: var(--bew-control-height);
+      border-radius: var(--bew-control-radius);
+      font-size: var(--bew-control-icon-size);
       filter: drop-shadow(0 0 4px var(--bew-bg));
     }
 
-    &.active a,
-    & a:hover,
+    &.active > a,
+    &.active > .top-bar-item-editor > a,
+    & > a:hover,
+    & > .top-bar-item-editor > a:hover,
     & .notifications:hover,
     & .notifications:active {
       --uno: "bg-$bew-fill-2";
     }
 
-    &.active a.white-icon,
-    & a:hover.white-icon,
+    &.active > a.white-icon,
+    &.active > .top-bar-item-editor > a.white-icon,
+    & > a:hover.white-icon,
+    & > .top-bar-item-editor > a:hover.white-icon,
     & .notifications:hover.white-icon,
     & .notifications:active.white-icon {
       --uno: "bg-white bg-opacity-20";

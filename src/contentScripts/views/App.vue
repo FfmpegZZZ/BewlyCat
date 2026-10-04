@@ -1,15 +1,24 @@
 <script setup lang="ts">
-import { onKeyStroke, useEventListener, useIntersectionObserver, useThrottleFn, useToggle } from '@vueuse/core'
+import { onKeyStroke, useEventListener, useIntersectionObserver, useThrottleFn } from '@vueuse/core'
 import type { Ref } from 'vue'
-import { provide, ref } from 'vue'
+import { provide, ref, watch } from 'vue'
+import { useI18n } from 'vue-i18n'
 
-import type { BewlyAppProvider } from '~/composables/useAppProvider'
+import Button from '~/components/Button.vue'
+import Icon from '~/components/Icon.vue'
+import Radio from '~/components/Radio.vue'
+import TopBarModeSwitcher from '~/components/TopBar/components/TopBarModeSwitcher.vue'
+import type { BewlyAppProvider, SettingsNavigationTarget } from '~/composables/useAppProvider'
 import { DrawerType, UndoForwardState } from '~/composables/useAppProvider'
+import type { ConfirmDialogOptions, ConfirmDialogToggleField } from '~/composables/useConfirmDialog'
+import { confirmDialogKey } from '~/composables/useConfirmDialog'
 import { useDark } from '~/composables/useDark'
+import { useLayoutEditMode } from '~/composables/useLayoutEditMode'
 import { BEWLY_MOUNTED, DRAWER_VIDEO_ENTER_PAGE_FULL, DRAWER_VIDEO_EXIT_PAGE_FULL, IFRAME_PAGE_SWITCH_BEWLY, IFRAME_PAGE_SWITCH_BILI, OVERLAY_SCROLL_BAR_SCROLL, OVERLAY_SCROLL_STATE_CHANGE } from '~/constants/globalEvents'
+import { installScrollBridge } from '~/contentScripts/features/scrollBridge'
 import { HomeSubPage } from '~/contentScripts/views/Home/types'
 import { AppPage } from '~/enums/appEnums'
-import { settings } from '~/logic'
+import { settings, settingsReady } from '~/logic'
 import type { DockItem } from '~/stores/mainStore'
 import { useMainStore } from '~/stores/mainStore'
 import { useSettingsStore } from '~/stores/settingsStore'
@@ -17,6 +26,8 @@ import { useTopBarStore } from '~/stores/topBarStore'
 import { setOriginalBilibiliTopBarScrolled } from '~/utils/bilibiliTopBar'
 import { isHomePage, isInIframe, isNotificationPage, isSearchResultsPage, isVideoOrBangumiPage, openLinkToNewTab, queryDomUntilFound, scrollToTop } from '~/utils/main'
 import emitter from '~/utils/mitt'
+import { applyPendingSettingsMigrations, formatSettingsMigrationConfirmMessage, getPendingSettingsMigrationChoices, hasPendingSettingsMigrations } from '~/utils/settingsMigration'
+import { isComponentVisible } from '~/utils/topBarBadge'
 
 import { setupNecessarySettingsWatchers } from './necessarySettingsWatchers'
 
@@ -28,6 +39,9 @@ function isFestivalPage(): boolean {
 const mainStore = useMainStore()
 const settingsStore = useSettingsStore()
 const topBarStore = useTopBarStore()
+// Layout edit mode is UI-only; persistent choices continue to use `settings`.
+const { isLayoutEditing, exitLayoutEditMode } = useLayoutEditMode()
+const { t } = useI18n()
 
 // Conditionally use dark mode. `useDark()` handles the video-page-only route gate.
 let isDark: Ref<boolean>
@@ -40,7 +54,165 @@ if (shouldUseDark) {
 else {
   isDark = ref(false)
 }
-const [showSettings, toggleSettings] = useToggle(false)
+const showSettings = ref(false)
+const pendingSettingsNavigation = ref<SettingsNavigationTarget>()
+const searchFocusOverlayActive = ref(false)
+const pageWallpaperReady = ref(false)
+const useBlendedPageControls = computed(() => settings.value.enableFrostedGlass
+  && settings.value.frostedGlassBlurIntensity > 0
+  && (pageWallpaperReady.value || (settings.value.useLinearGradientThemeColorBackground && isDark.value)))
+
+function openSettings(target?: SettingsNavigationTarget) {
+  pendingSettingsNavigation.value = target
+  showSettings.value = true
+}
+
+// The top-bar switcher is teleported to document.body, outside this Shadow DOM.
+// Raise the host while settings are open so the modal can stay above that layer.
+watch(showSettings, (visible) => {
+  document.getElementById('bewly')?.classList.toggle('settings-open', visible)
+}, { immediate: true })
+
+interface ConfirmDialogRequest {
+  id: number
+  message: string
+  title?: string
+  confirmLabel?: string
+  toggleFields?: ConfirmDialogToggleField[]
+  resolve: (confirmed: boolean) => void
+  settled: boolean
+}
+
+/**
+ * Lightweight confirm host (no Dialog / Transition / Teleport).
+ * Resolving the promise often mutates large page lists (favorites, history…);
+ * doing that in the same tick as a Transition/Teleport teardown races Vue's
+ * patcher and throws insertBefore NotFoundError under <App>.
+ */
+const activeConfirmDialog = ref<ConfirmDialogRequest>()
+const confirmDialogQueue: ConfirmDialogRequest[] = []
+let confirmDialogBusy = false
+let confirmDialogIdSeq = 0
+
+function showNextConfirmDialog() {
+  activeConfirmDialog.value = confirmDialogQueue.shift()
+}
+
+const confirmDialogPanelStyle = computed(() => {
+  const frostedGlass = settings.value.enableFrostedGlass
+  return {
+    backdropFilter: frostedGlass ? 'var(--bew-filter-glass-2)' : 'none',
+    WebkitBackdropFilter: frostedGlass ? 'var(--bew-filter-glass-2)' : 'none',
+    backgroundColor: frostedGlass ? 'var(--bew-elevated-alt)' : 'var(--bew-elevated-alt-solid)',
+  }
+})
+
+function showConfirmDialog(message: string, options: ConfirmDialogOptions = {}): Promise<boolean> {
+  return new Promise((resolve) => {
+    const request: ConfirmDialogRequest = {
+      id: ++confirmDialogIdSeq,
+      message,
+      title: options.title,
+      confirmLabel: options.confirmLabel,
+      toggleFields: options.toggleFields,
+      resolve,
+      settled: false,
+    }
+
+    if (activeConfirmDialog.value || confirmDialogBusy)
+      confirmDialogQueue.push(request)
+    else
+      activeConfirmDialog.value = request
+  })
+}
+
+function finishConfirmDialog(confirmed: boolean) {
+  const request = activeConfirmDialog.value
+  if (!request || request.settled)
+    return
+
+  request.settled = true
+  confirmDialogBusy = true
+  // Unmount the overlay first; only then resolve so callers' DOM updates
+  // (e.g. splicing favorite cards) never interleave with this node removal.
+  activeConfirmDialog.value = undefined
+
+  nextTick(() => {
+    request.resolve(confirmed)
+    confirmDialogBusy = false
+    showNextConfirmDialog()
+  })
+}
+
+onKeyStroke('Escape', (e: KeyboardEvent) => {
+  if (!activeConfirmDialog.value && !isLayoutEditing.value)
+    return
+  e.preventDefault()
+  e.stopPropagation()
+  e.stopImmediatePropagation()
+  if (activeConfirmDialog.value)
+    finishConfirmDialog(false)
+  else
+    exitLayoutEditMode()
+}, { dedupe: true })
+
+onKeyStroke('Enter', (e: KeyboardEvent) => {
+  if (!activeConfirmDialog.value)
+    return
+  const target = e.target as HTMLElement | null
+  if (target?.closest('.bew-confirm-dialog__field'))
+    return
+  e.preventDefault()
+  e.stopPropagation()
+  finishConfirmDialog(true)
+}, { dedupe: true })
+
+provide(confirmDialogKey, {
+  confirm: showConfirmDialog,
+})
+
+const SETTINGS_MIGRATION_PROMPT_DISMISSED_KEY = 'bewlycat-settings-migration-prompt-dismissed'
+
+async function promptSettingsMigrationIfNeeded() {
+  if (isInIframe())
+    return
+  if (sessionStorage.getItem(SETTINGS_MIGRATION_PROMPT_DISMISSED_KEY))
+    return
+
+  await settingsReady
+  const record = settings.value as unknown as Record<string, unknown>
+  if (!hasPendingSettingsMigrations(record))
+    return
+
+  const message = formatSettingsMigrationConfirmMessage(
+    record,
+    t,
+    'settings.maintenance.migrate_legacy_settings_confirm',
+  )
+  if (!message)
+    return
+
+  const toggleFields = getPendingSettingsMigrationChoices(record).map(choice => ({
+    id: choice.id,
+    label: String(t(choice.titleKey)),
+    value: choice.value,
+    enabledLabel: String(t('settings.chk_box.show')),
+    disabledLabel: String(t('settings.chk_box.hidden')),
+  }))
+  const confirmed = await showConfirmDialog(message, {
+    title: t('settings.maintenance.migrate_legacy_title'),
+    confirmLabel: t('settings.maintenance.migrate_legacy_action'),
+    toggleFields,
+  })
+  if (!confirmed) {
+    sessionStorage.setItem(SETTINGS_MIGRATION_PROMPT_DISMISSED_KEY, '1')
+    return
+  }
+
+  applyPendingSettingsMigrations(record, Object.fromEntries(
+    toggleFields.map(field => [field.id, field.value]),
+  ))
+}
 
 // Get the 'page' query parameter from the URL
 function getPageParam(): AppPage | null {
@@ -52,19 +224,13 @@ function getPageParam(): AppPage | null {
 }
 
 const activatedPage = ref<AppPage>(getPageParam() || (settings.value.dockItemsConfig.find(e => e.visible === true)?.page || AppPage.Home))
-
-// 监听 URL 变化,同步更新 activatedPage
-useEventListener(window, 'pushstate', () => {
-  const pageParam = getPageParam()
-  if (pageParam && pageParam !== activatedPage.value) {
-    activatedPage.value = pageParam
-  }
-})
-useEventListener(window, 'popstate', () => {
-  const pageParam = getPageParam()
-  if (pageParam && pageParam !== activatedPage.value) {
-    activatedPage.value = pageParam
-  }
+const pageControlWallpaperMask = computed(() => {
+  if (!pageWallpaperReady.value)
+    return '0%'
+  const separateSearchWallpaper = activatedPage.value === AppPage.Search && settings.value.individuallySetSearchPageWallpaper
+  const enabled = separateSearchWallpaper ? settings.value.searchPageEnableWallpaperMasking : settings.value.enableWallpaperMasking
+  const opacity = separateSearchWallpaper ? settings.value.searchPageWallpaperMaskOpacity : settings.value.wallpaperMaskOpacity
+  return `${enabled && Number.isFinite(opacity) ? Math.min(100, Math.max(0, opacity)) : 0}%`
 })
 
 // 清理搜索相关的URL参数（仅在首页生效）
@@ -117,9 +283,36 @@ function getDefaultHomeSubPage(tabConfig: { page: HomeSubPage, visible: boolean 
   return HomeSubPage.ForYou
 }
 
-// 添加Home页面的子页面状态
-const homeActivatedPage = ref<HomeSubPage>(getDefaultHomeSubPage(settings.value.homePageTabVisibilityList))
-const homeActivatedPageTouched = ref<boolean>(false)
+function getHomeTabParam(url = new URL(window.location.href)): HomeSubPage | null {
+  const tab = url.searchParams.get('tab') as HomeSubPage | null
+  return isHomePage(url.href) && url.searchParams.get('page') === AppPage.Home
+    && tab && Object.values(HomeSubPage).includes(tab)
+    ? tab
+    : null
+}
+
+// URL 中的显式 tab 优先于设置中的默认首页标签。
+const initialHomeTab = getHomeTabParam()
+const homeActivatedPage = ref<HomeSubPage>(initialHomeTab ?? getDefaultHomeSubPage(settings.value.homePageTabVisibilityList))
+const homeActivatedPageTouched = ref<boolean>(initialHomeTab !== null)
+const isHomeTabSwitching = ref<boolean>(false)
+
+function syncNavigationFromUrl() {
+  // 注入层的 pushstate 事件在原生方法执行前派发，延后读取最终地址。
+  queueMicrotask(() => {
+    const page = getPageParam()
+    if (page)
+      activatedPage.value = page
+    if (page === AppPage.Home) {
+      const tab = getHomeTabParam()
+      homeActivatedPage.value = tab ?? getDefaultHomeSubPage(settings.value.homePageTabVisibilityList)
+      homeActivatedPageTouched.value = tab !== null
+    }
+  })
+}
+useEventListener(window, 'pushstate', syncNavigationFromUrl)
+useEventListener(window, 'popstate', syncNavigationFromUrl)
+
 watch(
   () => settings.value.homePageTabVisibilityList,
   (tabConfig) => {
@@ -143,7 +336,672 @@ const pages = {
   [AppPage.Moments]: defineAsyncComponent(() => import('./Moments/Moments.vue')),
 }
 const mainAppRef = ref<HTMLElement>() as Ref<HTMLElement>
+
+interface LayoutEditTargetProxy extends SettingsNavigationTarget {
+  key: string
+  direct: boolean
+  left: number
+  top: number
+  width: number
+  height: number
+}
+
+interface LayoutEditTargetDescriptor extends SettingsNavigationTarget {
+  key: string
+  direct?: boolean
+}
+
+interface LayoutEditQuickSettingsAction extends SettingsNavigationTarget {
+  key: string
+  labelKey: string
+  icon: string
+}
+
+const layoutEditTargets = ref<LayoutEditTargetProxy[]>([])
+const layoutEditGridKind = ref<'video-card' | 'moments'>()
+const layoutEditDockVisible = ref(false)
+let layoutEditTargetObserver: MutationObserver | undefined
+let layoutEditTargetFrame: number | undefined
+let exposedLayoutEditElements: HTMLElement[] = []
+
+function clearExposedLayoutEditElements() {
+  exposedLayoutEditElements.forEach((element) => {
+    element.classList.remove('layout-edit-target--active')
+    element.removeAttribute('data-layout-edit-active')
+  })
+  exposedLayoutEditElements = []
+}
+
+function isLayoutEditCandidateVisible(element: HTMLElement) {
+  if (!element.isConnected || !element.getClientRects().length)
+    return false
+
+  const rect = element.getBoundingClientRect()
+  if (rect.width < 4 || rect.height < 4 || rect.bottom <= 0 || rect.right <= 0 || rect.top >= window.innerHeight || rect.left >= window.innerWidth)
+    return false
+
+  const style = window.getComputedStyle(element)
+  return style.display !== 'none' && style.visibility !== 'hidden' && Number.parseFloat(style.opacity || '1') > 0
+}
+
+function isOriginalMomentsFeedPage() {
+  return window.location.hostname === 't.bilibili.com' && /^\/?$/.test(window.location.pathname)
+}
+
+function refreshLayoutEditTargets() {
+  layoutEditTargetFrame = undefined
+  clearExposedLayoutEditElements()
+
+  if (!isLayoutEditing.value || !mainAppRef.value) {
+    layoutEditTargets.value = []
+    layoutEditGridKind.value = undefined
+    layoutEditDockVisible.value = false
+    return
+  }
+
+  const seenKeys = new Set<string>()
+  const nextTargets: LayoutEditTargetProxy[] = []
+  const appendTarget = (element: HTMLElement, descriptor?: LayoutEditTargetDescriptor) => {
+    const key = descriptor?.key ?? element.dataset.layoutEditTarget
+    const menu = descriptor?.menu
+      ?? element.dataset.layoutSettingsMenu as SettingsNavigationTarget['menu'] | undefined
+    if (!key || !menu || seenKeys.has(key) || !isLayoutEditCandidateVisible(element))
+      return
+
+    const rect = element.getBoundingClientRect()
+    const left = Math.max(0, rect.left)
+    const top = Math.max(0, rect.top)
+    const right = Math.min(window.innerWidth, rect.right)
+    const bottom = Math.min(window.innerHeight, rect.bottom)
+    if (right <= left || bottom <= top)
+      return
+
+    seenKeys.add(key)
+    element.classList.add('layout-edit-target--active')
+    element.dataset.layoutEditActive = 'true'
+    exposedLayoutEditElements.push(element)
+    nextTargets.push({
+      key,
+      menu,
+      direct: descriptor?.direct ?? element.hasAttribute('data-layout-edit-direct'),
+      secondaryPage: descriptor?.secondaryPage ?? element.dataset.layoutSettingsPage,
+      targetTitleKey: descriptor?.targetTitleKey ?? element.dataset.layoutSettingsTitleKey,
+      left,
+      top,
+      width: right - left,
+      height: bottom - top,
+    })
+  }
+
+  mainAppRef.value
+    .querySelectorAll<HTMLElement>('[data-layout-edit-target]')
+    .forEach(element => appendTarget(element))
+
+  const momentsGrid = mainAppRef.value.querySelector<HTMLElement>('.moments-grid')
+  const videoCardGrid = mainAppRef.value.querySelector<HTMLElement>('.video-card-grid-container')
+  layoutEditGridKind.value = momentsGrid && isLayoutEditCandidateVisible(momentsGrid)
+    ? 'moments'
+    : videoCardGrid && isLayoutEditCandidateVisible(videoCardGrid)
+      ? 'video-card'
+      : undefined
+
+  if (isVideoOrBangumiPage()) {
+    const player = document.querySelector<HTMLElement>('.bpx-player-container, #bilibili-player, .bilibili-player, .squirtle-video-wrap')
+    if (player) {
+      appendTarget(player, {
+        key: 'video-page-player',
+        menu: 'Bilibili',
+        secondaryPage: 'player',
+        targetTitleKey: 'settings.group_player_display_mode',
+      })
+    }
+
+    const watchLaterButton = document.querySelector<HTMLElement>('.bewly-watch-later-btn')
+    if (watchLaterButton) {
+      appendTarget(watchLaterButton, {
+        key: 'video-page-watch-later',
+        menu: 'Bilibili',
+        secondaryPage: 'player',
+        targetTitleKey: 'settings.external_watch_later_button',
+      })
+    }
+  }
+
+  if (isOriginalMomentsFeedPage()) {
+    const originalMomentTargets = [
+      {
+        key: 'original-moments-user-card',
+        enabled: settings.value.originalMomentsShowUserCard,
+        targetTitleKey: 'settings.original_moments_show_user_card',
+        selectors: [
+          '.bili-dyn-home--member > aside.left > section:has(.bili-dyn-my-info)',
+          '.bili-dyn-home--member > aside.left > section:has(.bili-dyn-my-info--skeleton)',
+          '.bili-dyn-my-info',
+          '.bili-dyn-my-info--skeleton',
+        ],
+      },
+      {
+        key: 'original-moments-live-list',
+        enabled: settings.value.originalMomentsShowLiveList,
+        targetTitleKey: 'settings.original_moments_show_live_list',
+        selectors: [
+          '.bili-dyn-home--member > aside.left > section:has(.bili-dyn-live-users)',
+          '.bili-dyn-live-users',
+        ],
+      },
+      {
+        key: 'original-moments-community-center',
+        enabled: settings.value.originalMomentsShowCommunityCenter,
+        targetTitleKey: 'settings.original_moments_show_community_center',
+        selectors: [
+          '.bili-dyn-home--member > aside.right > section:has(.bili-dyn-banner)',
+          '.bili-dyn-banner',
+        ],
+      },
+      {
+        key: 'original-moments-hot-search',
+        enabled: settings.value.originalMomentsShowHotSearch,
+        targetTitleKey: 'settings.original_moments_show_hot_search',
+        selectors: [
+          '.bili-dyn-home--member > aside.right > section:has(.bili-dyn-topic-box)',
+          '.bili-dyn-home--member > aside.right > section:has(.bili-dyn-search-trendings)',
+          '.bili-dyn-home--member > aside.right > section:has(.topic-panel)',
+          '.bili-dyn-topic-box',
+          '.bili-dyn-search-trendings',
+          '.topic-panel',
+        ],
+      },
+      {
+        key: 'original-moments-up-list',
+        enabled: settings.value.originalMomentsShowUpList,
+        targetTitleKey: 'settings.original_moments_show_up_list',
+        selectors: [
+          '.bili-dyn-home--member > main > section:has(.bili-dyn-up-list)',
+          '.bili-dyn-up-list',
+        ],
+      },
+    ]
+
+    originalMomentTargets.forEach((target) => {
+      if (!target.enabled)
+        return
+
+      const element = target.selectors
+        .map(selector => document.querySelector<HTMLElement>(selector))
+        .find(candidate => candidate && isLayoutEditCandidateVisible(candidate))
+      if (!element)
+        return
+
+      appendTarget(element, {
+        key: target.key,
+        menu: 'BewlyPages',
+        secondaryPage: 'moments',
+        targetTitleKey: target.targetTitleKey,
+      })
+    })
+  }
+
+  layoutEditTargets.value = nextTargets
+  layoutEditDockVisible.value = nextTargets.some(target => target.key === 'dock-component')
+}
+
+function scheduleLayoutEditTargetsRefresh() {
+  if (layoutEditTargetFrame !== undefined)
+    return
+  layoutEditTargetFrame = window.requestAnimationFrame(refreshLayoutEditTargets)
+}
+
+function stopLayoutEditTargetObserver() {
+  layoutEditTargetObserver?.disconnect()
+  layoutEditTargetObserver = undefined
+  if (layoutEditTargetFrame !== undefined)
+    window.cancelAnimationFrame(layoutEditTargetFrame)
+  layoutEditTargetFrame = undefined
+  clearExposedLayoutEditElements()
+  layoutEditTargets.value = []
+  layoutEditGridKind.value = undefined
+  layoutEditDockVisible.value = false
+}
+
+function startLayoutEditTargetObserver() {
+  stopLayoutEditTargetObserver()
+  nextTick(() => {
+    if (!isLayoutEditing.value || !mainAppRef.value)
+      return
+
+    refreshLayoutEditTargets()
+    layoutEditTargetObserver = new MutationObserver(scheduleLayoutEditTargetsRefresh)
+    layoutEditTargetObserver.observe(mainAppRef.value, { childList: true, subtree: true })
+    layoutEditTargetObserver.observe(document.body, { childList: true, subtree: true })
+  })
+}
+
+function isLayoutEditControlEvent(event: Event) {
+  return event.composedPath().some((target) => {
+    return target instanceof HTMLElement
+      && (target.hasAttribute('data-layout-edit-control') || target.classList.contains('bew-confirm-dialog'))
+  })
+}
+
+function getDirectLayoutEditTarget(event: Event) {
+  return event.composedPath().find((target): target is HTMLElement => {
+    return target instanceof HTMLElement
+      && target.hasAttribute('data-layout-edit-target')
+      && target.hasAttribute('data-layout-edit-direct')
+  })
+}
+
+function blockOriginalLayoutInteraction(event: Event) {
+  if (!isLayoutEditing.value || isLayoutEditControlEvent(event))
+    return
+
+  const directTarget = getDirectLayoutEditTarget(event)
+  if (event.type === 'click' && directTarget) {
+    const menu = directTarget.dataset.layoutSettingsMenu as SettingsNavigationTarget['menu'] | undefined
+    if (menu) {
+      openSettings({
+        menu,
+        secondaryPage: directTarget.dataset.layoutSettingsPage,
+        targetTitleKey: directTarget.dataset.layoutSettingsTitleKey,
+      })
+    }
+  }
+
+  if (event.cancelable)
+    event.preventDefault()
+  event.stopPropagation()
+  event.stopImmediatePropagation()
+}
+
+function openLayoutTargetSettings(target: LayoutEditTargetProxy) {
+  openSettings({
+    menu: target.menu,
+    secondaryPage: target.secondaryPage,
+    targetTitleKey: target.targetTitleKey,
+  })
+}
+
+const layoutEditDockPage = computed(() => {
+  if (!isHomePage() || activatedPage.value === AppPage.SearchResults)
+    return undefined
+  return mainStore.getDockItemByPage(activatedPage.value)
+})
+
+const layoutEditDockPageConfig = computed(() => {
+  return settings.value.dockItemsConfig.find(item => item.page === layoutEditDockPage.value?.page)
+})
+
+const showLayoutEditPageModeAction = computed(() => {
+  return Boolean(
+    isLayoutEditing.value
+    && !settings.value.useOriginalBilibiliHomepage
+    && layoutEditDockPage.value?.hasBewlyPage,
+  )
+})
+
+const showLayoutEditSearchResultsAction = computed(() => {
+  return isLayoutEditing.value && activatedPage.value === AppPage.SearchResults
+})
+
+const layoutEditGridActionKind = computed<'video-card' | 'moments' | undefined>(() => {
+  if (!isLayoutEditing.value || settings.value.useOriginalBilibiliHomepage)
+    return undefined
+
+  if (activatedPage.value === AppPage.SearchResults)
+    return 'video-card'
+
+  const showingPluginDockPage = !layoutEditDockPageConfig.value?.useOriginalBiliPage
+  if (showingPluginDockPage && activatedPage.value === AppPage.Home)
+    return 'video-card'
+  if (showingPluginDockPage && activatedPage.value === AppPage.Moments)
+    return 'moments'
+
+  return layoutEditGridKind.value
+})
+
+const layoutEditContextActions = computed<LayoutEditQuickSettingsAction[]>(() => {
+  if (!isLayoutEditing.value)
+    return []
+
+  if (isVideoOrBangumiPage()) {
+    return [
+      {
+        key: 'video-default-player-mode',
+        labelKey: 'layout_editor.video_default_player_mode',
+        icon: 'mingcute:play-circle-line',
+        menu: 'Bilibili',
+        secondaryPage: 'player',
+        targetTitleKey: 'settings.video_default_player_mode',
+      },
+      {
+        key: 'video-auto-play',
+        labelKey: 'layout_editor.video_auto_play',
+        icon: 'mingcute:list-check-3-line',
+        menu: 'Bilibili',
+        secondaryPage: 'auto-play',
+        targetTitleKey: 'settings.group_playback_end_behavior',
+      },
+      {
+        key: 'video-external-watch-later',
+        labelKey: 'layout_editor.video_external_watch_later',
+        icon: 'mingcute:carplay-line',
+        menu: 'Bilibili',
+        secondaryPage: 'player',
+        targetTitleKey: 'settings.external_watch_later_button',
+      },
+      {
+        key: 'video-sidebar-position',
+        labelKey: 'layout_editor.video_sidebar_position',
+        icon: 'mingcute:navigation-line',
+        menu: 'BewlyComponents',
+        secondaryPage: 'dock',
+        targetTitleKey: 'settings.sidebar_position',
+      },
+      {
+        key: 'video-topbar-auto-hide',
+        labelKey: 'layout_editor.video_topbar_auto_hide',
+        icon: 'mingcute:settings-3-line',
+        menu: 'BewlyComponents',
+        secondaryPage: 'topbar',
+        targetTitleKey: 'settings.auto_hide_top_bar',
+      },
+    ]
+  }
+
+  if (isOriginalMomentsFeedPage()) {
+    const actions: LayoutEditQuickSettingsAction[] = []
+    const appendHiddenOriginalMomentAction = (
+      visible: boolean,
+      key: string,
+      labelKey: string,
+      icon: string,
+      targetTitleKey: string,
+    ) => {
+      if (visible)
+        return
+      actions.push({
+        key,
+        labelKey,
+        icon,
+        menu: 'BewlyPages',
+        secondaryPage: 'moments',
+        targetTitleKey,
+      })
+    }
+
+    appendHiddenOriginalMomentAction(
+      settings.value.originalMomentsShowUserCard,
+      'original-moments-show-user-card',
+      'layout_editor.original_moments_show_user_card',
+      'mingcute:settings-3-line',
+      'settings.original_moments_show_user_card',
+    )
+    appendHiddenOriginalMomentAction(
+      settings.value.originalMomentsShowLiveList,
+      'original-moments-show-live-list',
+      'layout_editor.original_moments_show_live_list',
+      'mingcute:play-circle-line',
+      'settings.original_moments_show_live_list',
+    )
+    appendHiddenOriginalMomentAction(
+      settings.value.originalMomentsShowCommunityCenter,
+      'original-moments-show-community-center',
+      'layout_editor.original_moments_show_community_center',
+      'mingcute:layout-grid-line',
+      'settings.original_moments_show_community_center',
+    )
+    appendHiddenOriginalMomentAction(
+      settings.value.originalMomentsShowHotSearch,
+      'original-moments-show-hot-search',
+      'layout_editor.original_moments_show_hot_search',
+      'mingcute:search-2-line',
+      'settings.original_moments_show_hot_search',
+    )
+    appendHiddenOriginalMomentAction(
+      settings.value.originalMomentsShowUpList,
+      'original-moments-show-up-list',
+      'layout_editor.original_moments_show_up_list',
+      'mingcute:list-check-3-line',
+      'settings.original_moments_show_up_list',
+    )
+    return actions
+  }
+
+  if (activatedPage.value === AppPage.Moments && !layoutEditDockPageConfig.value?.useOriginalBiliPage) {
+    return [
+      {
+        key: 'moments-content-filters',
+        labelKey: 'layout_editor.moments_filter_content',
+        icon: 'mingcute:list-check-3-line',
+        menu: 'BewlyPages',
+        secondaryPage: 'moments',
+        targetTitleKey: 'settings.moments_filtered_types',
+      },
+      {
+        key: 'moments-preview',
+        labelKey: 'layout_editor.moments_preview',
+        icon: 'mingcute:play-circle-line',
+        menu: 'BewlyPages',
+        secondaryPage: 'moments',
+        targetTitleKey: 'settings.moments_enable_video_preview',
+      },
+    ]
+  }
+
+  if (activatedPage.value === AppPage.Search) {
+    return [
+      {
+        key: 'search-suggestions-history',
+        labelKey: 'layout_editor.search_suggestions_history',
+        icon: 'mingcute:search-2-line',
+        menu: 'BewlyPages',
+        secondaryPage: 'search',
+        targetTitleKey: 'settings.group_search_bar',
+      },
+      {
+        key: 'search-wallpaper',
+        labelKey: 'layout_editor.search_wallpaper',
+        icon: 'mingcute:settings-3-line',
+        menu: 'BewlyPages',
+        secondaryPage: 'search',
+        targetTitleKey: 'settings.group_wallpaper',
+      },
+    ]
+  }
+
+  if (activatedPage.value === AppPage.SearchResults) {
+    return [
+      {
+        key: 'search-results-personalization',
+        labelKey: 'layout_editor.search_results_personalization',
+        icon: 'mingcute:search-2-line',
+        menu: 'BewlyPages',
+        secondaryPage: 'search',
+        targetTitleKey: 'settings.depersonalize_search_results',
+      },
+      {
+        key: 'search-results-pagination',
+        labelKey: 'layout_editor.search_results_pagination',
+        icon: 'mingcute:list-check-3-line',
+        menu: 'BewlyPages',
+        secondaryPage: 'search',
+        targetTitleKey: 'settings.search_results_pagination_mode',
+      },
+    ]
+  }
+
+  if (activatedPage.value !== AppPage.Home || layoutEditDockPageConfig.value?.useOriginalBiliPage)
+    return []
+
+  if (homeActivatedPage.value === HomeSubPage.ForYou) {
+    return [
+      {
+        key: 'home-recommendation-filters',
+        labelKey: 'layout_editor.home_filter_recommendations',
+        icon: 'mingcute:list-check-3-line',
+        menu: 'BewlyPages',
+        secondaryPage: 'home',
+        targetTitleKey: 'settings.group_recommendation_filters',
+      },
+      {
+        key: 'home-recommendation-mode',
+        labelKey: 'layout_editor.home_recommendation_mode',
+        icon: 'mingcute:settings-3-line',
+        menu: 'BewlyPages',
+        secondaryPage: 'home',
+        targetTitleKey: 'settings.group_recommendation_mode',
+      },
+    ]
+  }
+
+  if (homeActivatedPage.value === HomeSubPage.Following) {
+    return [
+      {
+        key: 'following-live-videos',
+        labelKey: settings.value.followingTabShowLivestreamingVideos
+          ? 'layout_editor.following_hide_live'
+          : 'layout_editor.following_show_live',
+        icon: 'mingcute:play-circle-line',
+        menu: 'BewlyPages',
+        secondaryPage: 'home',
+        targetTitleKey: 'settings.following_tab_show_livestreaming_videos',
+      },
+      {
+        key: 'following-uploader-list',
+        labelKey: 'layout_editor.following_hide_uploader_list',
+        icon: 'mingcute:settings-3-line',
+        menu: 'BewlyPages',
+        secondaryPage: 'home',
+        targetTitleKey: 'settings.use_following_new_layout',
+      },
+      {
+        key: 'following-content-filters',
+        labelKey: 'layout_editor.following_filter_videos',
+        icon: 'mingcute:list-check-3-line',
+        menu: 'BewlyPages',
+        secondaryPage: 'home',
+        targetTitleKey: 'settings.following_filter_charging_videos',
+      },
+    ]
+  }
+
+  return []
+})
+
+function openLayoutEditPageModeSettings() {
+  const dockPage = layoutEditDockPage.value
+  if (!dockPage)
+    return
+
+  openSettings({
+    menu: 'BewlyComponents',
+    secondaryPage: 'dock',
+    targetTitleKey: dockPage.i18nKey,
+  })
+}
+
+function openLayoutEditGridSettings() {
+  if (layoutEditGridActionKind.value === 'moments') {
+    openSettings({
+      menu: 'BewlyPages',
+      secondaryPage: 'moments',
+      targetTitleKey: 'settings.moments_grid_columns',
+    })
+    return
+  }
+
+  if (layoutEditGridActionKind.value === 'video-card') {
+    openSettings({
+      menu: 'BewlyComponents',
+      secondaryPage: 'video-card',
+      targetTitleKey: 'settings.grid_breakpoints',
+    })
+  }
+}
+
+function openLayoutEditDockPositionSettings() {
+  openSettings({
+    menu: 'BewlyComponents',
+    secondaryPage: 'dock',
+    targetTitleKey: 'settings.dock_position',
+  })
+}
+
+function openLayoutEditTopBarModeSettings() {
+  openSettings({
+    menu: 'BewlyComponents',
+    secondaryPage: 'topbar',
+    targetTitleKey: 'topbar.top_bar_switcher',
+  })
+}
+
+function openLayoutEditSearchResultsSettings() {
+  openSettings({
+    menu: 'BewlyPages',
+    secondaryPage: 'search',
+    targetTitleKey: 'settings.group_search_results',
+  })
+}
+
+function openLayoutEditContextSettings(action: LayoutEditQuickSettingsAction) {
+  openSettings({
+    menu: action.menu,
+    secondaryPage: action.secondaryPage,
+    targetTitleKey: action.targetTitleKey,
+  })
+}
+
+watch(isLayoutEditing, (editing) => {
+  if (editing) {
+    mainAppRef.value?.querySelector<HTMLElement>(':focus')?.blur()
+    startLayoutEditTargetObserver()
+    window.setTimeout(scheduleLayoutEditTargetsRefresh, 350)
+    window.setTimeout(scheduleLayoutEditTargetsRefresh, 1200)
+    window.setTimeout(scheduleLayoutEditTargetsRefresh, 2500)
+  }
+  else {
+    stopLayoutEditTargetObserver()
+  }
+}, { immediate: true })
+
+watch(() => settings.value.showLayoutEditButton, (visible) => {
+  if (!visible && isLayoutEditing.value)
+    exitLayoutEditMode()
+})
+
+watch(() => settings.value.dockPosition, () => {
+  nextTick(scheduleLayoutEditTargetsRefresh)
+  window.setTimeout(scheduleLayoutEditTargetsRefresh, 350)
+})
+
+watch(activatedPage, scheduleLayoutEditTargetsRefresh)
+
+watch(
+  [
+    () => settings.value.originalMomentsShowUserCard,
+    () => settings.value.originalMomentsShowLiveList,
+    () => settings.value.originalMomentsShowCommunityCenter,
+    () => settings.value.originalMomentsShowHotSearch,
+    () => settings.value.originalMomentsShowUpList,
+  ],
+  scheduleLayoutEditTargetsRefresh,
+)
+
+useEventListener(window, 'resize', scheduleLayoutEditTargetsRefresh)
+useEventListener(window, 'scroll', scheduleLayoutEditTargetsRefresh, { passive: true })
+onUnmounted(stopLayoutEditTargetObserver)
 const scrollViewportRef = ref<HTMLElement | null>(null)
+watch(scrollViewportRef, (viewport, _previousViewport, onCleanup) => {
+  if (viewport && isHomePage() && !settings.value.useOriginalBilibiliHomepage)
+    onCleanup(installScrollBridge(viewport))
+}, { flush: 'post' })
+
+function handlePageBackgroundMouseDown(event: MouseEvent) {
+  // Only background elements bind this with .self. Avoid starting a native
+  // selection across the feed from its gutters, while keeping card text selectable.
+  if (activatedPage.value === AppPage.Home && event.button === 0)
+    event.preventDefault()
+}
 const loadMoreSentinelRef = ref<HTMLElement>() // ✅ IntersectionObserver 哨兵元素
 const handlePageRefresh = ref<() => void>()
 const handleReachBottom = ref<() => void>()
@@ -155,7 +1013,17 @@ const undoForwardState = ref<UndoForwardState>(UndoForwardState.Hidden)
 const canRefreshCurrentPage = computed((): boolean => {
   return activatedPage.value !== AppPage.Home || homeActivatedPage.value === HomeSubPage.ForYou || canRefreshHomeSubPage.value
 })
+let refreshScrollTimer: ReturnType<typeof setTimeout> | undefined
+
+function cancelPendingPageRefresh() {
+  clearTimeout(refreshScrollTimer)
+  refreshScrollTimer = undefined
+}
+
+onBeforeUnmount(cancelPendingPageRefresh)
+
 const handleThrottledPageRefresh = useThrottleFn(() => {
+  cancelPendingPageRefresh()
   if (!canRefreshCurrentPage.value)
     return
 
@@ -169,15 +1037,21 @@ const handleThrottledPageRefresh = useThrottleFn(() => {
   }
   else {
     handleBackToTop()
+    const refresh = handlePageRefresh.value
+    const deadline = performance.now() + 3000
     const checkScrollComplete = () => {
-      if (viewport.scrollTop === 0) {
-        handlePageRefresh.value?.()
+      refreshScrollTimer = undefined
+      if (!viewport.isConnected || viewport !== scrollViewportRef.value || refresh !== handlePageRefresh.value)
+        return
+
+      if (viewport.scrollTop <= 1) {
+        refresh?.()
       }
-      else {
-        setTimeout(checkScrollComplete, 50)
+      else if (performance.now() < deadline) {
+        refreshScrollTimer = setTimeout(checkScrollComplete, 50)
       }
     }
-    setTimeout(checkScrollComplete, 100)
+    refreshScrollTimer = setTimeout(checkScrollComplete, 100)
   }
 }, 500)
 const handleThrottledReachBottom = useThrottleFn(() => handleReachBottom.value?.(), 200)
@@ -186,6 +1060,27 @@ const handleThrottledPageUnRefresh = useThrottleFn(() => handleUndoRefresh.value
 const handleThrottledPageForwardRefresh = useThrottleFn(() => handleForwardRefresh.value?.(), 500)
 const topBarRef = ref()
 const reachTop = ref<boolean>(true)
+const scrollTop = ref<number>(0)
+
+watch(isHomeTabSwitching, (switching) => {
+  if (switching)
+    return
+
+  // IntersectionObserver may have reported an intersection while callbacks were
+  // suspended. Recheck once after restoration so a genuinely short/bottom page
+  // can still request more content without waiting for another scroll event.
+  requestAnimationFrame(() => {
+    const viewport = scrollViewportRef.value
+    const sentinel = loadMoreSentinelRef.value
+    if (!viewport || !sentinel || isHomeTabSwitching.value)
+      return
+
+    const viewportRect = viewport.getBoundingClientRect()
+    const sentinelRect = sentinel.getBoundingClientRect()
+    if (sentinelRect.top <= viewportRect.bottom + 200 && sentinelRect.bottom >= viewportRect.top)
+      handleThrottledReachBottom()
+  })
+})
 
 const iframeDrawerURL = ref<string>('')
 const showIframeDrawer = ref<boolean>(false)
@@ -200,7 +1095,14 @@ function setActiveDrawer(drawer: DrawerType) {
 const hideUIForIframePhotoViewer = ref<boolean>(false)
 
 const iframePageRef = ref()
-useEventListener(window, 'message', ({ data }) => {
+useEventListener(window, 'message', ({ data, source }) => {
+  if (typeof data !== 'string')
+    return
+
+  const iframe = iframePageRef.value?.$el?.querySelector('iframe')
+  if (!iframe || source !== iframe.contentWindow)
+    return
+
   switch (data) {
     case IFRAME_PAGE_SWITCH_BEWLY:
       {
@@ -238,11 +1140,14 @@ useEventListener(window, 'message', ({ data, source }) => {
   if (source !== window.parent)
     return
 
+  if (!data || typeof data !== 'object' || Array.isArray(data))
+    return
+
   const { type, isDark, darkModeBaseColor } = data
 
   if (type === 'iframeDarkModeChange') {
     // 在iframe环境中，只更新DOM样式，不修改用户的主题设置
-    // 避免覆盖用户设置的"auto"模式
+    // 避免覆盖用户选择的设备或定时主题模式
     if (isInIframe()) {
       // Check if we should apply selective dark mode (plugin UI only) on festival pages
       const isSelectiveDark = isFestivalPage()
@@ -312,6 +1217,43 @@ const showBewlyPage = computed((): boolean => {
 
   return isHomePage() && !settings.value.useOriginalBilibiliHomepage
 })
+
+// App outlives page components. Drop outgoing closures before the next page
+// registers its actions so evicted KeepAlive pages and their lists can be collected.
+watch([activatedPage, () => activatedPage.value === AppPage.Home ? homeActivatedPage.value : undefined, showBewlyPage], () => {
+  cancelPendingPageRefresh()
+  handlePageRefresh.value = undefined
+  handleReachBottom.value = undefined
+  handleUndoRefresh.value = undefined
+  handleForwardRefresh.value = undefined
+  undoForwardState.value = UndoForwardState.Hidden
+  canRefreshHomeSubPage.value = false
+}, { flush: 'sync' })
+
+// Keep the browser tab title in sync with the page selected from the Dock.
+// Search results manages its own keyword-aware title in SearchResults.vue.
+const dockPageTitle = computed<string | undefined>(() => {
+  if (activatedPage.value === AppPage.SearchResults)
+    return undefined
+
+  const titleKey = activatedPage.value === AppPage.Home
+    ? mainStore.homeTabs.find(tab => tab.page === homeActivatedPage.value)?.i18nKey
+    : mainStore.getDockItemByPage(activatedPage.value)?.i18nKey
+
+  if (!titleKey)
+    return undefined
+
+  if (activatedPage.value === AppPage.Home)
+    return `首页-${t(titleKey)}-哔哩哔哩`
+
+  return `${t(titleKey)} - 哔哩哔哩`
+})
+
+watch(dockPageTitle, (title) => {
+  if (title && isHomePage())
+    document.title = title
+}, { immediate: true })
+
 const showTopBar = computed((): boolean => {
   // When using the open in drawer feature, the iframe inside the page will hide the top bar
   if (isVideoOrBangumiPage() && isInIframe())
@@ -362,14 +1304,27 @@ function focusScrollViewport(options: { force?: boolean } = {}) {
 }
 
 const isFirstTimeActivatedPageChange = ref<boolean>(true)
+function syncNavigationUrl() {
+  const url = new URL(window.location.href)
+  url.searchParams.set('page', activatedPage.value)
+  if (activatedPage.value === AppPage.Home)
+    url.searchParams.set('tab', homeActivatedPage.value)
+  else
+    url.searchParams.delete('tab')
+  if (url.href !== window.location.href)
+    window.history.replaceState(window.history.state, '', url.href)
+}
+
+watch(homeActivatedPage, () => {
+  if (isHomePage() && activatedPage.value === AppPage.Home)
+    syncNavigationUrl()
+}, { immediate: true })
+
 watch(
   () => activatedPage.value,
   () => {
     if (!isFirstTimeActivatedPageChange.value) {
-      // Update the URL query parameter when activatedPage changes
-      const url = new URL(window.location.href)
-      url.searchParams.set('page', activatedPage.value)
-      window.history.replaceState({}, '', url.toString())
+      syncNavigationUrl()
     }
 
     scrollViewportRef.value?.scrollTo({ top: 0 })
@@ -404,22 +1359,46 @@ watch([() => showTopBar.value, () => activatedPage.value], () => {
 // Setup necessary settings watchers
 setupNecessarySettingsWatchers()
 let scrollingEmitted = false
+let isAppMounted = false
+let stopHomeKeyStroke: (() => void) | null = null
+let stopLoadMoreIntersectionObserver: (() => void) | null = null
+
+function handleMetaHomeKeydown(e: KeyboardEvent) {
+  if (e.key === 'ArrowUp' && e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey) {
+    handleThrottledBackToTop()
+    focusScrollViewport({ force: true })
+    e.preventDefault()
+  }
+}
+
+function handleDocumentScroll() {
+  if (scrollViewportRef.value && isHomePage() && !settings.value.useOriginalBilibiliHomepage)
+    return
+
+  scrollTop.value = window.scrollY
+  reachTop.value = window.scrollY <= 0
+}
 
 onMounted(() => {
+  isAppMounted = true
   window.dispatchEvent(new CustomEvent(BEWLY_MOUNTED))
 
   // ✅ 设置 IntersectionObserver 用于无限滚动底部检测（仅在首页且使用Bewly页面时）
   // 避免在每次滚动时读取 scrollHeight/clientHeight
   if (isHomePage() && !settings.value.useOriginalBilibiliHomepage) {
     nextTick(() => {
+      if (!isAppMounted)
+        return
+
       const viewport = scrollViewportRef.value
       if (!viewport)
         return
 
-      useIntersectionObserver(
+      stopLoadMoreIntersectionObserver?.()
+      const { stop } = useIntersectionObserver(
         loadMoreSentinelRef,
         ([{ isIntersecting }]) => {
-          if (isIntersecting) {
+          if (isIntersecting && !isHomeTabSwitching.value) {
             handleThrottledReachBottom()
           }
         },
@@ -429,39 +1408,28 @@ onMounted(() => {
           threshold: 0,
         },
       )
+      stopLoadMoreIntersectionObserver = stop
     })
   }
 
   if (isHomePage()) {
-    // Force overwrite Bilibili Evolved body tag & html tag background color
-    document.body.style.setProperty('background-color', 'unset', 'important')
-
     focusScrollViewport()
 
     // Windows/Linux: 监听 Home 键
-    onKeyStroke('Home', (e) => {
+    stopHomeKeyStroke = onKeyStroke('Home', (e) => {
       handleThrottledBackToTop()
       focusScrollViewport({ force: true })
       e.preventDefault()
     })
 
     // macOS: 使用原生事件监听 Command+↑ 组合键
-    document.addEventListener('keydown', (e) => {
-      // 确保只有同时按下 Command 和 ArrowUp 键时才触发
-      if (e.key === 'ArrowUp' && e.metaKey && !e.ctrlKey && !e.altKey && !e.shiftKey) {
-        handleThrottledBackToTop()
-        focusScrollViewport({ force: true })
-        e.preventDefault()
-      }
-    })
+    document.addEventListener('keydown', handleMetaHomeKeydown)
   }
 
-  document.addEventListener('scroll', () => {
-    if (window.scrollY > 0)
-      reachTop.value = false
-    else
-      reachTop.value = true
-  })
+  document.addEventListener('scroll', handleDocumentScroll, { passive: true })
+  // 刷新后停在半页时，首帧就要有正确的滚动状态（reachTop 与遮罩强度）
+  handleDocumentScroll()
+  void promptSettingsMigrationIfNeeded()
 })
 
 function handleDockItemClick(dockItem: DockItem) {
@@ -553,22 +1521,31 @@ function handleOsScroll(_instance: any, event: Event) {
 
   // 使用 RAF 将所有 DOM 读取合并到下一帧
   rafId = requestAnimationFrame(() => {
-    const scrollTop = latestScrollTop
+    const frameScrollTop = latestScrollTop
 
-    emitter.emit(OVERLAY_SCROLL_BAR_SCROLL, scrollTop)
-    if (settings.value.useOriginalBilibiliTopBar)
-      setOriginalBilibiliTopBarScrolled(document, scrollTop > 0)
+    emitter.emit(OVERLAY_SCROLL_BAR_SCROLL, frameScrollTop)
+    if (settings.value.enableTopBar && settings.value.useOriginalBilibiliTopBar)
+      setOriginalBilibiliTopBarScrolled(document, frameScrollTop > 0)
 
     // 只在滚动距离超过阈值时更新状态
-    const scrollDelta = Math.abs(scrollTop - lastScrollTop)
+    const scrollDelta = Math.abs(frameScrollTop - lastScrollTop)
     if (scrollDelta > 50) {
-      lastScrollTop = scrollTop
+      lastScrollTop = frameScrollTop
     }
 
-    reachTop.value = scrollTop === 0
+    scrollTop.value = frameScrollTop
+    reachTop.value = frameScrollTop === 0
 
-    // ✅ 移除手动的"到达底部"检测，改用 IntersectionObserver（见 loadMoreSentinelRef）
-    // 这避免了在每次滚动时计算 threshold 和读取 scrollHeight/clientHeight
+    // IntersectionObserver 只在相交状态变化时回调，dock 切页等时机可能丢失边缘事件
+    // （如切走时哨兵处于相交中，切回后状态未发生跳变），滚动时按几何位置兜底触发
+    const viewportEl = scrollViewportRef.value
+    const sentinelEl = loadMoreSentinelRef.value
+    if (viewportEl && sentinelEl && !isHomeTabSwitching.value) {
+      const viewportRect = viewportEl.getBoundingClientRect()
+      const sentinelRect = sentinelEl.getBoundingClientRect()
+      if (sentinelRect.top <= viewportRect.bottom + 200 && sentinelRect.bottom >= viewportRect.top)
+        handleThrottledReachBottom()
+    }
 
     // 清除之前的滚动结束定时器
     if (scrollEndTimer) {
@@ -598,6 +1575,33 @@ function handleOsScroll(_instance: any, event: Event) {
 function handleNativeScroll(event: Event) {
   handleOsScroll(null, event)
 }
+
+onUnmounted(() => {
+  isAppMounted = false
+  stopHomeKeyStroke?.()
+  stopHomeKeyStroke = null
+  stopLoadMoreIntersectionObserver?.()
+  stopLoadMoreIntersectionObserver = null
+  document.removeEventListener('keydown', handleMetaHomeKeydown)
+  document.removeEventListener('scroll', handleDocumentScroll)
+
+  if (rafId !== null) {
+    cancelAnimationFrame(rafId)
+    rafId = null
+  }
+  if (scrollStateTimer) {
+    clearTimeout(scrollStateTimer)
+    scrollStateTimer = null
+  }
+  if (scrollEndTimer) {
+    clearTimeout(scrollEndTimer)
+    scrollEndTimer = null
+  }
+  if (scrollingEmitted) {
+    emitter.emit(OVERLAY_SCROLL_STATE_CHANGE, false)
+    scrollingEmitted = false
+  }
+})
 
 function openIframeDrawer(url: string) {
   const isSameOrigin = (origin: URL, destination: URL) =>
@@ -635,27 +1639,31 @@ async function haveScrollbar() {
   return viewport.scrollHeight > viewport.clientHeight
 }
 
-// In drawer video, watch btn className changed and post message to parent
+// In drawer/dialog video, watch btn className changed and post message to parent
 watchEffect(async (onCleanUp) => {
   if (!isInIframe())
     return null
 
+  const webFullscreenBtnSelector = '.bpx-player-ctrl-web, .bilibili-player-video-web-fullscreen, .squirtle-video-pagefullscreen'
+
+  function notifyDrawerPageFullscreen(el: HTMLElement) {
+    const entered = el.classList.contains('bpx-state-entered')
+      || !!document.querySelector('[data-screen="web"]')
+    parent.postMessage(entered ? DRAWER_VIDEO_ENTER_PAGE_FULL : DRAWER_VIDEO_EXIT_PAGE_FULL)
+  }
+
   const observer = new MutationObserver(([{ target: el }]) => {
     if (!(el instanceof HTMLElement))
-      return null
-    if (el.classList.contains('bpx-state-entered')) {
-      parent.postMessage(DRAWER_VIDEO_ENTER_PAGE_FULL)
-    }
-    else {
-      parent.postMessage(DRAWER_VIDEO_EXIT_PAGE_FULL)
-    }
+      return
+    notifyDrawerPageFullscreen(el)
   })
 
   const abort = new AbortController()
-  queryDomUntilFound('.bpx-player-ctrl-btn.bpx-player-ctrl-web', 500, abort).then((openVideo2WebFullBtn) => {
+  queryDomUntilFound(webFullscreenBtnSelector, 500, abort).then((openVideo2WebFullBtn) => {
     if (!openVideo2WebFullBtn)
       return
-    observer.observe(openVideo2WebFullBtn, { attributes: true })
+    notifyDrawerPageFullscreen(openVideo2WebFullBtn)
+    observer.observe(openVideo2WebFullBtn, { attributes: true, attributeFilter: ['class'] })
   })
 
   onCleanUp(() => {
@@ -668,9 +1676,12 @@ provide<BewlyAppProvider>('BEWLY_APP', {
   activatedPage,
   homeActivatedPage,
   homeActivatedPageTouched,
+  isHomeTabSwitching,
   mainAppRef,
   scrollViewportRef,
   reachTop,
+  scrollTop,
+  searchFocusOverlayActive,
   handleBackToTop,
   handlePageRefresh,
   canRefreshHomeSubPage,
@@ -682,11 +1693,14 @@ provide<BewlyAppProvider>('BEWLY_APP', {
   haveScrollbar,
   activeDrawer,
   setActiveDrawer,
+  pendingSettingsNavigation,
+  openSettings,
 })
 
 if (settings.value.cleanUrlArgument) {
   const BASE_PARAMS_TO_REMOVE = new Set([
     'spm_id_from',
+    'hcfrom',
     'from_source',
     'msource',
     'bsource',
@@ -725,6 +1739,8 @@ if (settings.value.cleanUrlArgument) {
 
   let isCleaningUrl = false // 防止重复执行
   let cleanupTimer: ReturnType<typeof setTimeout> | null = null
+  let lastCleanedUrl = window.location.href
+  let urlChangeSyncQueued = false
 
   function cleanUrlParams() {
     // 防止在页面加载过程中执行URL清理
@@ -734,16 +1750,20 @@ if (settings.value.cleanUrlArgument) {
 
     try {
       isCleaningUrl = true
+      const sourceUrl = window.location.href
       const currentUrl = new URL(window.location.href)
       let hasChanged = false
 
       for (const param of BASE_PARAMS_TO_REMOVE) {
+        if (param === 'tab' && getHomeTabParam(currentUrl))
+          continue
         if (currentUrl.searchParams.has(param)) {
           currentUrl.searchParams.delete(param)
           hasChanged = true
         }
       }
-      if (currentUrl.hostname.endsWith('bilibili.com') && currentUrl.pathname.startsWith('/video/')) {
+      const hostname = currentUrl.hostname
+      if ((hostname === 'bilibili.com' || hostname.endsWith('.bilibili.com')) && currentUrl.pathname.startsWith('/video/')) {
         for (const param of VIDEO_ONLY_PARAMS_TO_REMOVE) {
           if (currentUrl.searchParams.has(param)) {
             currentUrl.searchParams.delete(param)
@@ -758,18 +1778,22 @@ if (settings.value.cleanUrlArgument) {
           .replace(/%3D/gi, '=')
           .replace(/%26/g, '&')
 
+        const applyCleanUrl = () => {
+          // 空闲回调执行前可能已切换 tab，旧地址不能覆盖新的导航状态。
+          if (window.location.href === sourceUrl) {
+            history.replaceState(history.state, '', newUrl)
+            lastCleanedUrl = window.location.href
+          }
+          isCleaningUrl = false
+          if (window.location.href !== newUrl)
+            scheduleCleanup()
+        }
         // 使用 requestIdleCallback 来避免阻塞页面加载
         if (window.requestIdleCallback) {
-          window.requestIdleCallback(() => {
-            history.replaceState(null, '', newUrl)
-            isCleaningUrl = false
-          })
+          window.requestIdleCallback(applyCleanUrl)
         }
         else {
-          setTimeout(() => {
-            history.replaceState(null, '', newUrl)
-            isCleaningUrl = false
-          }, 0)
+          setTimeout(applyCleanUrl, 0)
         }
       }
       else {
@@ -802,36 +1826,37 @@ if (settings.value.cleanUrlArgument) {
     window.addEventListener('load', () => scheduleCleanup(1000), { once: true })
   }
 
-  // 监听URL变化，但增加防抖和延迟
-  if (typeof window !== 'undefined') {
-    let lastUrl = window.location.href
-    let urlCheckTimer: ReturnType<typeof setTimeout> | null = null
+  function syncUrlCleanupAfterNavigation() {
+    if (urlChangeSyncQueued)
+      return
 
-    const checkUrlChange = () => {
-      if (window.location.href !== lastUrl) {
-        lastUrl = window.location.href
-        scheduleCleanup(2000) // 页面跳转后延迟更长时间
-      }
-      urlCheckTimer = setTimeout(checkUrlChange, 1000) // 降低检查频率
-    }
+    urlChangeSyncQueued = true
+    // pushState/replaceState 通知在原生 history 方法执行前派发，等微任务
+    // 再读取最终 URL，并合并同一轮中的重复路由事件。
+    queueMicrotask(() => {
+      urlChangeSyncQueued = false
+      if (window.location.href === lastCleanedUrl)
+        return
 
-    // 页面可见性变化时停止/恢复检查
-    document.addEventListener('visibilitychange', () => {
-      if (document.hidden) {
-        if (urlCheckTimer) {
-          clearTimeout(urlCheckTimer)
-          urlCheckTimer = null
-        }
-      }
-      else {
-        if (!urlCheckTimer) {
-          checkUrlChange()
-        }
-      }
+      lastCleanedUrl = window.location.href
+      scheduleCleanup(2000)
     })
-
-    checkUrlChange()
   }
+
+  useEventListener(window, 'pushstate', syncUrlCleanupAfterNavigation)
+  useEventListener(window, 'replacestate', syncUrlCleanupAfterNavigation)
+  useEventListener(window, 'popstate', syncUrlCleanupAfterNavigation)
+  useEventListener(window, 'hashchange', syncUrlCleanupAfterNavigation)
+  useEventListener(window, 'pageshow', syncUrlCleanupAfterNavigation)
+  useEventListener(document, 'visibilitychange', () => {
+    if (!document.hidden)
+      syncUrlCleanupAfterNavigation()
+  })
+
+  onUnmounted(() => {
+    if (cleanupTimer)
+      clearTimeout(cleanupTimer)
+  })
 }
 </script>
 
@@ -840,22 +1865,171 @@ if (settings.value.cleanUrlArgument) {
     id="bewly-wrapper"
     ref="mainAppRef"
     class="bewly-wrapper"
-    :class="{ dark: isDark }"
-    text="$bew-text-1 size-$bew-base-font-size"
+    :class="{
+      'dark': isDark,
+      'bewly-wrapper--viewport': isHomePage() && !settings.useOriginalBilibiliHomepage,
+    }"
+    text="$bew-text-1"
+    @pointerdown.capture="blockOriginalLayoutInteraction"
+    @click.capture="blockOriginalLayoutInteraction"
+    @auxclick.capture="blockOriginalLayoutInteraction"
+    @contextmenu.capture="blockOriginalLayoutInteraction"
+    @keydown.capture="blockOriginalLayoutInteraction"
+    @scroll.capture.passive="scheduleLayoutEditTargetsRefresh"
   >
     <!-- Background -->
     <template v-if="showBewlyPage">
-      <AppBackground :activated-page="activatedPage" />
+      <AppBackground :activated-page="activatedPage" @wallpaper-ready="pageWallpaperReady = $event" />
     </template>
 
     <!-- Settings -->
     <KeepAlive>
-      <Settings v-if="showSettings" z-10002 @close="showSettings = false" />
+      <Settings
+        v-if="showSettings"
+        style="z-index: var(--bew-z-settings);"
+        @close="showSettings = false"
+      />
     </KeepAlive>
+
+    <Transition name="fade">
+      <svg
+        v-if="isLayoutEditing"
+        class="layout-edit-backdrop"
+        aria-hidden="true"
+        @wheel.prevent
+        @touchmove.prevent
+      >
+        <defs>
+          <mask id="layout-edit-cutout-mask">
+            <rect width="100%" height="100%" fill="white" />
+            <rect
+              v-for="target in layoutEditTargets"
+              :key="target.key"
+              :x="target.left - 3"
+              :y="target.top - 3"
+              :width="target.width + 6"
+              :height="target.height + 6"
+              rx="10"
+              fill="black"
+            />
+          </mask>
+        </defs>
+        <rect
+          width="100%"
+          height="100%"
+          fill="var(--bew-bg)"
+          fill-opacity="0.9"
+          mask="url(#layout-edit-cutout-mask)"
+        />
+      </svg>
+    </Transition>
+
+    <div
+      v-if="isLayoutEditing"
+      class="layout-edit-target-layer"
+      data-layout-edit-control
+    >
+      <button
+        v-for="target in layoutEditTargets"
+        v-show="!target.direct"
+        :key="target.key"
+        type="button"
+        class="layout-edit-target-proxy"
+        :style="{
+          left: `${target.left - 3}px`,
+          top: `${target.top - 3}px`,
+          width: `${target.width + 6}px`,
+          height: `${target.height + 6}px`,
+        }"
+        :aria-label="$t('layout_editor.click_to_adjust')"
+        :title="$t('layout_editor.click_to_adjust')"
+        @click="openLayoutTargetSettings(target)"
+      />
+    </div>
+
+    <div
+      v-if="isLayoutEditing"
+      class="layout-edit-helper"
+      :class="{ 'layout-edit-helper--dock-left': settings.dockPosition === 'left' }"
+      data-layout-edit-control
+    >
+      <div
+        v-if="isLayoutEditing || showLayoutEditPageModeAction || showLayoutEditSearchResultsAction || layoutEditGridActionKind || layoutEditDockVisible || layoutEditContextActions.length"
+        class="layout-edit-quick-actions"
+      >
+        <button
+          type="button"
+          class="layout-edit-quick-action"
+          @click="openLayoutEditTopBarModeSettings"
+        >
+          <Icon icon="mingcute:transfer-3-line" aria-hidden="true" />
+          <span>{{ $t(settings.useOriginalBilibiliTopBar
+            ? 'layout_editor.switch_to_bewly_topbar'
+            : 'layout_editor.switch_to_original_topbar') }}</span>
+        </button>
+        <button
+          v-if="showLayoutEditPageModeAction"
+          type="button"
+          class="layout-edit-quick-action"
+          @click="openLayoutEditPageModeSettings"
+        >
+          <Icon icon="mingcute:transfer-3-line" aria-hidden="true" />
+          <span>{{ $t(layoutEditDockPageConfig?.useOriginalBiliPage
+            ? 'layout_editor.switch_to_plugin_page'
+            : 'layout_editor.switch_to_bilibili_page') }}</span>
+        </button>
+        <button
+          v-for="action in layoutEditContextActions"
+          :key="action.key"
+          type="button"
+          class="layout-edit-quick-action"
+          @click="openLayoutEditContextSettings(action)"
+        >
+          <Icon :icon="action.icon" aria-hidden="true" />
+          <span>{{ $t(action.labelKey) }}</span>
+        </button>
+        <button
+          v-if="showLayoutEditSearchResultsAction"
+          type="button"
+          class="layout-edit-quick-action"
+          @click="openLayoutEditSearchResultsSettings"
+        >
+          <Icon icon="mingcute:search-2-line" aria-hidden="true" />
+          <span>{{ $t('settings.group_search_results') }}</span>
+        </button>
+        <button
+          v-if="layoutEditDockVisible"
+          type="button"
+          class="layout-edit-quick-action"
+          @click="openLayoutEditDockPositionSettings"
+        >
+          <Icon icon="mingcute:navigation-line" aria-hidden="true" />
+          <span>{{ $t('layout_editor.adjust_dock_position') }}</span>
+        </button>
+        <button
+          v-if="layoutEditGridActionKind"
+          type="button"
+          class="layout-edit-quick-action"
+          @click="openLayoutEditGridSettings"
+        >
+          <Icon icon="mingcute:layout-grid-line" aria-hidden="true" />
+          <span>{{ $t(layoutEditGridActionKind === 'moments'
+            ? 'layout_editor.adjust_moments_grid_columns'
+            : 'layout_editor.adjust_video_grid_columns') }}</span>
+        </button>
+      </div>
+
+      <div class="layout-edit-hint" role="status">
+        <Icon icon="mingcute:cursor-3-line" aria-hidden="true" />
+        <span>{{ $t('layout_editor.click_to_adjust') }}</span>
+      </div>
+    </div>
 
     <!-- Dock & RightSideButtons -->
     <div
       v-if="!isInIframe()"
+      class="dock-sidebar-host"
+      :class="{ 'dock-sidebar-host--editing': isLayoutEditing }"
       pos="absolute top-0 left-0" w-full h-full overflow-hidden
       pointer-events-none
       :style="{
@@ -867,7 +2041,6 @@ if (settings.value.cleanUrlArgument) {
         v-if="!settings.useOriginalBilibiliHomepage && (settings.alwaysUseDock || (showBewlyPage || iframePageURL))"
         pointer-events-auto
         :activated-page="activatedPage"
-        @settings-visibility-change="toggleSettings"
         @refresh="handleThrottledPageRefresh"
         @undo-refresh="handleThrottledPageUnRefresh"
         @forward-refresh="handleThrottledPageForwardRefresh"
@@ -877,13 +2050,17 @@ if (settings.value.cleanUrlArgument) {
       <SideBar
         v-else
         pointer-events-auto
-        @settings-visibility-change="toggleSettings"
       />
     </div>
 
     <!-- TopBar -->
     <div
       v-if="showTopBar"
+      class="top-bar-host"
+      :class="{
+        'top-bar-host--behind-search-overlay': searchFocusOverlayActive,
+        'top-bar-host--editing': isLayoutEditing,
+      }"
       m-auto max-w="$bew-page-max-width"
       :style="{
         opacity: hideUIForIframePhotoViewer ? 0 : 1,
@@ -891,12 +2068,19 @@ if (settings.value.cleanUrlArgument) {
         transition: 'opacity 0.2s ease',
       }"
     >
-      <BewlyOrBiliTopBarSwitcher v-if="settings.showBewlyOrBiliTopBarSwitcher" />
-
       <TopBar
-        pos="top-0 left-0" z="1 hover:1001" w-full
+        class="top-bar-layer"
+        pos="top-0 left-0" w-full
       />
     </div>
+
+    <TopBarModeSwitcher
+      v-if="isInIframe()
+        && settings.enableTopBar
+        && settings.useOriginalBilibiliTopBar
+        && isComponentVisible('topBarSwitcher')"
+      native
+    />
 
     <div
       v-if="!settings.useOriginalBilibiliHomepage"
@@ -909,19 +2093,23 @@ if (settings.value.cleanUrlArgument) {
         <template v-if="showBewlyPage">
           <div
             ref="scrollViewportRef"
-            class="bewly-scroll-viewport"
+            class="bewly-scroll-viewport bew-page-controls"
+            :class="{ 'bew-page-controls--blend': useBlendedPageControls }"
+            :style="{ '--bew-control-wallpaper-mask': pageControlWallpaperMask }"
             h-inherit of-y-auto of-x-hidden
             tabindex="-1"
             style="overscroll-behavior: contain;"
             @scroll.passive="handleNativeScroll"
+            @mousedown.self="handlePageBackgroundMouseDown"
           >
-            <main m-auto max-w="$bew-page-max-width">
+            <main m-auto max-w="$bew-page-max-width" @mousedown.self="handlePageBackgroundMouseDown">
               <div
                 p="t-[calc(var(--bew-top-bar-height)+10px)]" m-auto
                 w="lg:[calc(100%-200px)] [calc(100%-150px)]"
-                :style="settings.useOriginalBilibiliTopBar && !reachTop
+                :style="settings.enableTopBar && settings.useOriginalBilibiliTopBar && !reachTop
                   ? { paddingTop: 'calc(var(--bew-top-bar-height) + 120px)' }
                   : undefined"
+                @mousedown.self="handlePageBackgroundMouseDown"
               >
                 <Transition name="page-fade">
                   <Component :is="pages[activatedPage]" :key="activatedPage" />
@@ -936,7 +2124,7 @@ if (settings.value.cleanUrlArgument) {
       </Transition>
 
       <Transition v-if="!showBewlyPage && iframePageURL && !isInIframe()" name="fade">
-        <IframePage ref="iframePageRef" :url="iframePageURL" />
+        <IframePage ref="iframePageRef" :url="iframePageURL" @scroll="topBarRef?.handleScroll($event)" />
       </Transition>
     </div>
 
@@ -945,15 +2133,360 @@ if (settings.value.cleanUrlArgument) {
       :url="iframeDrawerURL"
       @close="showIframeDrawer = false"
     />
+
+    <!-- Static confirm overlay: no Transition/Teleport (see finishConfirmDialog). -->
+    <div
+      v-if="activeConfirmDialog"
+      :key="activeConfirmDialog.id"
+      class="bew-confirm-dialog"
+      role="alertdialog"
+      aria-modal="true"
+      :aria-label="$t('common.operation.confirm')"
+    >
+      <div class="bew-confirm-dialog__backdrop" @click="finishConfirmDialog(false)" />
+      <div class="bew-confirm-dialog__panel" :style="confirmDialogPanelStyle">
+        <header class="bew-confirm-dialog__header">
+          <p class="bew-confirm-dialog__title">
+            {{ activeConfirmDialog.title || $t('common.operation.confirm') }}
+          </p>
+          <button
+            type="button"
+            class="bew-confirm-dialog__close"
+            :aria-label="$t('common.operation.cancel')"
+            @click="finishConfirmDialog(false)"
+          >
+            <div i-ic-baseline-clear />
+          </button>
+        </header>
+        <div class="bew-confirm-dialog__body">
+          <p class="bew-confirm-dialog__message">
+            {{ activeConfirmDialog.message }}
+          </p>
+          <div
+            v-if="activeConfirmDialog.toggleFields?.length"
+            class="bew-confirm-dialog__fields"
+          >
+            <div
+              v-for="field in activeConfirmDialog.toggleFields"
+              :key="field.id"
+              class="bew-confirm-dialog__field"
+            >
+              <span class="bew-confirm-dialog__field-label">{{ field.label }}</span>
+              <Radio
+                v-model="field.value"
+                :label="field.value ? field.enabledLabel : field.disabledLabel"
+              />
+            </div>
+          </div>
+        </div>
+        <footer class="bew-confirm-dialog__footer">
+          <Button type="tertiary" @click="finishConfirmDialog(true)">
+            {{ activeConfirmDialog.confirmLabel || $t('common.operation.confirm') }}
+          </Button>
+          <Button type="primary" @click="finishConfirmDialog(false)">
+            {{ $t('common.operation.cancel') }}
+          </Button>
+        </footer>
+      </div>
+    </div>
   </div>
 </template>
 
 <style lang="scss" scoped>
+.top-bar-layer {
+  z-index: 1001;
+}
+
+.layout-edit-backdrop {
+  position: fixed;
+  z-index: 10000;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  cursor: default;
+  pointer-events: auto;
+}
+
+.layout-edit-target-layer {
+  position: fixed;
+  z-index: 10002;
+  inset: 0;
+  pointer-events: none;
+}
+
+.layout-edit-target-proxy {
+  position: fixed;
+  box-sizing: border-box;
+  padding: 0;
+  border: 1px solid var(--bew-theme-color);
+  border-radius: var(--bew-interactive-radius);
+  background: transparent;
+  box-shadow: 0 0 0 1px var(--bew-theme-color-20);
+  cursor: pointer;
+  pointer-events: auto;
+}
+
+.layout-edit-target-proxy:hover,
+.layout-edit-target-proxy:focus-visible {
+  border-color: var(--bew-theme-color);
+  background: var(--bew-theme-color-10);
+  box-shadow: 0 0 0 2px var(--bew-theme-color-30);
+  outline: none;
+}
+
+.layout-edit-helper {
+  position: fixed;
+  z-index: 10005;
+  bottom: max(var(--bew-space-4), env(safe-area-inset-bottom));
+  left: max(var(--bew-space-4), env(safe-area-inset-left));
+  display: flex;
+  max-height: calc(100vh - var(--bew-space-8));
+  max-width: min(360px, calc(100vw - var(--bew-space-8)));
+  align-items: flex-start;
+  flex-direction: column;
+  gap: var(--bew-space-2);
+  pointer-events: auto;
+}
+
+.layout-edit-helper--dock-left {
+  right: max(var(--bew-space-4), env(safe-area-inset-right));
+  left: auto;
+  align-items: flex-end;
+}
+
+.layout-edit-quick-actions {
+  display: flex;
+  max-height: calc(100vh - var(--bew-control-height) - var(--bew-space-8));
+  max-width: 100%;
+  overflow-y: auto;
+  align-items: flex-start;
+  flex-direction: column;
+  gap: var(--bew-space-1);
+  overscroll-behavior: contain;
+}
+
+.layout-edit-quick-action,
+.layout-edit-hint {
+  display: inline-flex;
+  min-height: var(--bew-control-height);
+  align-items: center;
+  gap: var(--bew-space-2);
+  padding: 0 var(--bew-space-3);
+  color: var(--bew-text-1);
+  background: var(--bew-elevated-alt-solid);
+  border: 1px solid var(--bew-border-color);
+  border-radius: var(--bew-interactive-radius);
+  box-shadow: var(--bew-shadow-3), var(--bew-shadow-edge-glow-1);
+  font-size: var(--bew-font-size-control);
+  font-weight: var(--bew-font-weight-semibold);
+  line-height: var(--bew-line-height-control);
+}
+
+.layout-edit-quick-action {
+  max-width: 100%;
+  border-color: var(--bew-theme-color-30);
+  color: var(--bew-text-1);
+  cursor: pointer;
+  text-align: left;
+}
+
+.layout-edit-quick-action:hover {
+  border-color: var(--bew-theme-color-60);
+  background: color-mix(in oklab, var(--bew-elevated-alt-solid) 88%, var(--bew-theme-color) 12%);
+  color: var(--bew-theme-color);
+}
+
+.layout-edit-quick-action:focus-visible {
+  outline: 2px solid var(--bew-theme-color);
+  outline-offset: var(--bew-space-0-5);
+}
+
+.layout-edit-hint {
+  pointer-events: none;
+}
+
+.layout-edit-quick-action :deep(.bew-local-icon),
+.layout-edit-hint :deep(.bew-local-icon) {
+  width: var(--bew-icon-size-sm);
+  height: var(--bew-icon-size-sm);
+  flex: none;
+}
+
+.dock-sidebar-host--editing,
+.top-bar-host--editing {
+  pointer-events: none !important;
+}
+
+.dock-sidebar-host--editing :deep([data-layout-edit-control]),
+.top-bar-host--editing :deep([data-layout-edit-control]),
+.dock-sidebar-host--editing :deep([data-layout-edit-direct]),
+.top-bar-host--editing :deep([data-layout-edit-direct]) {
+  pointer-events: auto !important;
+}
+
+.dock-sidebar-host--editing :deep([data-layout-edit-target="dock-component"][data-layout-edit-active="true"]) {
+  outline: 1px solid var(--bew-theme-color);
+  outline-offset: 3px;
+  border-radius: var(--bew-interactive-radius);
+}
+
+.top-bar-host--editing :deep([data-layout-edit-target="topbar-component"][data-layout-edit-active="true"]) {
+  outline: 1px solid var(--bew-theme-color);
+  outline-offset: -1px;
+  box-shadow: inset 0 0 0 1px var(--bew-theme-color-20);
+}
+
+.dock-sidebar-host--editing :deep([data-layout-edit-target]:not([data-layout-edit-active="true"])),
+.top-bar-host--editing :deep([data-layout-edit-target]:not([data-layout-edit-active="true"])) {
+  opacity: 0.12 !important;
+}
+
+.dock-sidebar-host--editing {
+  z-index: 10001;
+}
+
+.top-bar-host--editing .top-bar-layer {
+  z-index: 10001;
+}
+
+.bew-confirm-dialog {
+  position: fixed;
+  inset: 0;
+  z-index: var(--bew-z-confirm-dialog);
+  pointer-events: auto;
+}
+
+.bew-confirm-dialog__backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgb(0 0 0 / 40%);
+}
+
+.bew-confirm-dialog__panel {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  display: flex;
+  flex-direction: column;
+  width: 420px;
+  max-width: calc(100vw - 32px);
+  overflow: hidden;
+  border: 1px solid var(--bew-border-color);
+  border-radius: var(--bew-modal-radius);
+  box-shadow: var(--bew-shadow-4), var(--bew-shadow-edge-glow-2);
+  transform: translate(-50%, -50%);
+}
+
+.bew-confirm-dialog__header {
+  display: flex;
+  gap: var(--bew-space-4);
+  align-items: center;
+  justify-content: space-between;
+  min-height: 70px;
+  padding: 0 var(--bew-space-8);
+}
+
+.bew-confirm-dialog__title {
+  margin: 0;
+  font-size: var(--bew-font-size-title);
+  font-weight: var(--bew-font-weight-semibold);
+  line-height: var(--bew-line-height-title);
+}
+
+.bew-confirm-dialog__close {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  appearance: none;
+  color: inherit;
+  cursor: pointer;
+  background: var(--bew-elevated);
+  border: 1px solid var(--bew-border-color);
+  border-radius: var(--bew-interactive-radius);
+  box-shadow: var(--bew-shadow-edge-glow-1), var(--bew-shadow-2);
+
+  &:hover {
+    color: var(--bew-theme-color);
+    background: var(--bew-theme-color-30);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--bew-theme-color-40);
+    outline-offset: var(--bew-space-0-5);
+  }
+}
+
+.bew-confirm-dialog__body {
+  max-height: min(60vh, 480px);
+  padding: var(--bew-space-2) var(--bew-space-8) var(--bew-space-2);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.bew-confirm-dialog__message {
+  margin: 0;
+  color: var(--bew-text-1);
+  font-size: var(--bew-font-size-body);
+  font-weight: var(--bew-font-weight-regular);
+  line-height: var(--bew-line-height-body);
+  white-space: pre-line;
+}
+
+.bew-confirm-dialog__fields {
+  display: flex;
+  flex-direction: column;
+  gap: var(--bew-space-2);
+  margin-top: var(--bew-space-4);
+}
+
+.bew-confirm-dialog__field {
+  display: flex;
+  min-height: 48px;
+  gap: var(--bew-space-4);
+  align-items: center;
+  justify-content: space-between;
+  padding: var(--bew-space-2) var(--bew-space-3);
+  background: var(--bew-fill-1);
+  border: 1px solid var(--bew-border-color);
+  border-radius: var(--bew-interactive-radius);
+}
+
+.bew-confirm-dialog__field-label {
+  color: var(--bew-text-1);
+  font-size: var(--bew-font-size-control);
+  font-weight: var(--bew-font-weight-semibold);
+  line-height: var(--bew-line-height-control);
+}
+
+.bew-confirm-dialog__footer {
+  display: flex;
+  gap: var(--bew-space-2);
+  justify-content: flex-end;
+  padding: var(--bew-space-2) var(--bew-space-8) var(--bew-space-6);
+}
+
+.top-bar-host--behind-search-overlay {
+  position: relative;
+  z-index: 0;
+}
+
 .bewly-wrapper {
   // To fix the filter used in `.bewly-wrapper` that cause the positions of elements become discorded.
   > * > * {
     filter: var(--bew-filter-force-dark);
   }
+}
+
+.bewly-wrapper--viewport {
+  position: relative;
+  width: 100%;
+  min-width: 0;
+  height: 100%;
+  overflow: hidden;
 }
 
 .bewly-scroll-viewport {

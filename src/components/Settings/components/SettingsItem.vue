@@ -5,26 +5,30 @@ withDefaults(defineProps<{
   title?: string
   desc?: string
   rightWidth?: RightWidth
+  badge?: string
 }>(), {
   rightWidth: 'default',
 })
 </script>
 
 <template>
-  <div class="b-settings-item" py-4>
+  <div class="b-settings-item" :data-settings-title="title" py-4>
     <div
-      class="b-settings-item-row" :class="`right-width-${rightWidth}`" flex="~ gap-4" justify-between items-center
-      text-base
+      class="b-settings-item-row settings-item-content" :class="`right-width-${rightWidth}`" flex="~ gap-4" justify-between items-center
     >
       <div class="left-content" flex-1 min-w-0>
         <div>
-          <slot name="title">
-            {{ title }}
-          </slot>
+          <span class="settings-item-title">
+            <slot name="title">
+              {{ title }}
+            </slot>
+            <span v-if="badge" class="settings-item-badge bew-warning-badge">{{ badge }}</span>
+          </span>
         </div>
 
         <div
-          text="sm $bew-text-2"
+          class="settings-item-desc"
+          text="$bew-text-2"
           break-words
           :style="{ marginTop: $slots.desc || desc ? '0.25rem' : '0' }"
         >
@@ -46,6 +50,16 @@ withDefaults(defineProps<{
 </template>
 
 <style lang="scss" scoped>
+.settings-item-content {
+  font-size: var(--bew-font-size-body);
+  line-height: var(--bew-line-height-body);
+}
+
+.settings-item-desc {
+  font-size: var(--bew-font-size-control);
+  line-height: var(--bew-line-height-control);
+}
+
 .right-width-auto {
   .left-content {
     --uno: "w-auto flex-1 min-w-0";
@@ -62,5 +76,13 @@ withDefaults(defineProps<{
 
 .b-settings-item + .b-settings-item {
   --uno: "border-t-1 border-$bew-border-color";
+}
+
+.settings-item-title {
+  color: var(--bew-text-1);
+  display: inline-flex;
+  gap: var(--bew-space-2);
+  align-items: center;
+  flex-wrap: wrap;
 }
 </style>

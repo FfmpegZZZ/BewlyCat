@@ -1,7 +1,65 @@
 import { runWhenIdle } from '~/utils/lazyLoad'
+import { isPhotoViewerOpen } from '~/utils/photoViewer'
 
 let observer: MutationObserver | null = null
-let isPhotoViewerOpen = false
+let wasPhotoViewerOpen = false
+let idleSetup: ReturnType<typeof runWhenIdle> | null = null
+let domReadyListener: (() => void) | null = null
+let rootReadyRetryTimer: number | null = null
+
+function clearDeferredSetup() {
+  idleSetup?.dispose()
+  idleSetup = null
+
+  if (domReadyListener) {
+    document.removeEventListener('DOMContentLoaded', domReadyListener)
+    domReadyListener = null
+  }
+
+  if (rootReadyRetryTimer !== null) {
+    window.clearTimeout(rootReadyRetryTimer)
+    rootReadyRetryTimer = null
+  }
+}
+
+function setupObserverWhenReady() {
+  if (observer)
+    return
+
+  const target = document.body ?? document.documentElement
+  if (!target) {
+    if (document.readyState === 'loading') {
+      if (!domReadyListener) {
+        domReadyListener = () => {
+          domReadyListener = null
+          setupObserverWhenReady()
+        }
+        document.addEventListener('DOMContentLoaded', domReadyListener, { once: true })
+      }
+    }
+    else if (rootReadyRetryTimer === null) {
+      rootReadyRetryTimer = window.setTimeout(() => {
+        rootReadyRetryTimer = null
+        setupObserverWhenReady()
+      }, 0)
+    }
+    return
+  }
+
+  observer = new MutationObserver(() => {
+    checkPhotoViewerState()
+  })
+
+  observer.observe(target, {
+    childList: true,
+    subtree: true,
+    attributes: true,
+    attributeFilter: ['class'],
+  })
+
+  // 初始检查
+  checkPhotoViewerState()
+}
 
 /**
  * 监听页面中 PhotoSwipe (pswp) 图片查看器的打开/关闭状态
@@ -13,34 +71,21 @@ export function setupIframePhotoViewerDetector() {
     return
 
   // 避免重复初始化
-  if (observer)
+  if (observer || idleSetup || domReadyListener || rootReadyRetryTimer !== null)
     return
 
-  runWhenIdle(() => {
-    observer = new MutationObserver(() => {
-      checkPhotoViewerState()
-    })
-
-    observer.observe(document.body, {
-      childList: true,
-      subtree: true,
-      attributes: true,
-      attributeFilter: ['class'],
-    })
-
-    // 初始检查
-    checkPhotoViewerState()
+  idleSetup = runWhenIdle(() => {
+    idleSetup = null
+    setupObserverWhenReady()
   })
 }
 
 function checkPhotoViewerState() {
-  // 检查是否存在打开的 PhotoSwipe 元素
-  const pswpElement = document.querySelector('.pswp')
-  const isOpen = pswpElement?.classList.contains('pswp--open') ?? false
+  const isOpen = isPhotoViewerOpen()
 
   // 只在状态变化时发送消息
-  if (isOpen !== isPhotoViewerOpen) {
-    isPhotoViewerOpen = isOpen
+  if (isOpen !== wasPhotoViewerOpen) {
+    wasPhotoViewerOpen = isOpen
 
     // 通知父页面 PhotoSwipe 的状态
     window.parent.postMessage({
@@ -51,7 +96,8 @@ function checkPhotoViewerState() {
 }
 
 export function cleanupIframePhotoViewerDetector() {
+  clearDeferredSetup()
   observer?.disconnect()
   observer = null
-  isPhotoViewerOpen = false
+  wasPhotoViewerOpen = false
 }

@@ -1,31 +1,34 @@
 <script setup lang="ts">
-import { Icon } from '@iconify/vue'
 import type flvjs from 'flv.js'
 import type { ErrorData, Events } from 'hls.js'
 import Hls from 'hls.js'
 
 import Button from '~/components/Button.vue'
+import Icon from '~/components/Icon.vue'
 import LazyPicture from '~/components/LazyPicture.vue'
+import Progress from '~/components/Progress.vue'
 import Tooltip from '~/components/Tooltip.vue'
+import { useVideoPreviewSwipeSeek } from '~/composables/useVideoPreviewSwipeSeek'
 import { settings } from '~/logic'
 import { calcCurrentTime } from '~/utils/dataFormatter'
+import { getVideoWatchState } from '~/utils/videoVisitHistory'
 
 import type { Video } from '../types'
 
 interface Props {
   skeleton?: boolean
   video?: Video
-  layout: 'modern' | 'compact' | 'old'
+  layout: 'modern' | 'old'
   horizontal?: boolean
   removed: boolean
   isHover: boolean
-  previewEnabled: boolean
   shouldHideOverlayElements: boolean
   previewVideoUrl: string
   videoElement: HTMLVideoElement | null
   isInWatchLater: boolean
   showWatcherLater: boolean
   coverTopLeftAlwaysVisible?: boolean
+  coverTopRightAlwaysVisible?: boolean
   coverImageUrl: string
   // Modern layout specific
   coverStatValues?: {
@@ -33,18 +36,17 @@ interface Props {
     danmaku: string
     like: string
     duration: string
-    published: string
   }
   coverStatsVisibility?: {
     view: boolean
     danmaku: boolean
     like: boolean
     duration: boolean
-    published: boolean
   }
   hasCoverStats?: boolean
   shouldHideCoverStats?: boolean
-  coverStatsStyle?: Record<string, string>
+  /** 数据未自带进度时，是否使用本地记录的观看进度。 */
+  showLocalWatchProgress?: boolean
 }
 
 const props = defineProps<Props>()
@@ -55,50 +57,37 @@ const emit = defineEmits<{
   previewFullscreenChange: [isFullscreen: boolean]
 }>()
 
+const playbackProgress = computed(() => {
+  const video = props.video
+  if (!video)
+    return undefined
+  if (video.playbackProgress !== undefined)
+    return video.playbackProgress
+  if (!props.showLocalWatchProgress)
+    return undefined
+
+  const watchState = getVideoWatchState({ aid: video.aid ?? video.id, bvid: video.bvid })
+  return watchState?.status === 'watched' ? watchState.percentage : undefined
+})
+
 const videoRef = ref<HTMLVideoElement | null>(null)
+const isActive = ref(true)
+const isCoverHovered = ref(false)
 const isLoadingStream = ref<boolean>(false)
 const isPreviewFullscreen = ref<boolean>(false)
-const isPreviewPlaying = ref<boolean>(false)
 const showVideoControls = ref<boolean>(false)
 const shouldEnableVideoControls = computed(() => settings.value.enableVideoCtrlBarOnVideoCard && !props.video?.roomid)
+const shouldEnableSwipeSeek = computed(() => settings.value.enableVideoPreviewSwipeSeek && !props.video?.roomid)
 let hls: Hls | null = null
 let flvPlayer: flvjs.Player | null = null
-let controlsHideTimeout: number | null = null
+let previewGeneration = 0
+let previewEvents: AbortController | null = null
 
-const shouldShowWatchLater = computed(() =>
-  props.previewEnabled ? isPreviewPlaying.value : props.isHover,
-)
-
-function handlePreviewPlaying() {
-  if (props.isHover && props.previewVideoUrl)
-    isPreviewPlaying.value = true
-}
-
-function clearControlsHideTimeout() {
-  if (controlsHideTimeout !== null) {
-    clearTimeout(controlsHideTimeout)
-    controlsHideTimeout = null
-  }
-}
-
-function scheduleControlsHide() {
-  clearControlsHideTimeout()
-  controlsHideTimeout = window.setTimeout(() => {
-    showVideoControls.value = false
-  }, 3000)
-}
-
-function showControlsTemporarily() {
+function showControls() {
   if (!shouldEnableVideoControls.value)
     return
 
   showVideoControls.value = true
-  if (isPreviewFullscreen.value) {
-    clearControlsHideTimeout()
-    return
-  }
-
-  scheduleControlsHide()
 }
 
 function handlePreviewMouseMove() {
@@ -108,20 +97,52 @@ function handlePreviewMouseMove() {
   if (!props.isHover && !isPreviewFullscreen.value)
     return
 
-  showControlsTemporarily()
+  showControls()
 }
+
+const {
+  isScrubbing,
+  scrubProgress,
+  resetPreviewScrub,
+  disposeSwipeSeek,
+  handlePreviewPointerDown,
+  handlePreviewPointerMove,
+  finishPreviewScrub,
+  handlePreviewClick,
+  handlePreviewDragStart,
+} = useVideoPreviewSwipeSeek(videoRef, shouldEnableSwipeSeek, shouldEnableVideoControls, handlePreviewMouseMove)
+
+const previewInteractionEvents = computed(() => ({
+  ...(shouldEnableVideoControls.value
+    ? { pointerenter: handlePreviewMouseMove }
+    : {}),
+  ...(shouldEnableVideoControls.value || shouldEnableSwipeSeek.value
+    ? { pointermove: handlePreviewPointerMove }
+    : {}),
+  ...(shouldEnableSwipeSeek.value
+    ? {
+        pointerdown: handlePreviewPointerDown,
+        pointerup: finishPreviewScrub,
+        pointercancel: (event: PointerEvent) => finishPreviewScrub(event, true),
+        click: handlePreviewClick,
+        dragstart: handlePreviewDragStart,
+      }
+    : {}),
+}))
 
 function resetVideoElement(videoEl: HTMLVideoElement) {
   videoEl.pause()
+  videoEl.srcObject = null
   videoEl.removeAttribute('src')
   videoEl.load()
 }
 
-function stopPreview(videoEl: HTMLVideoElement) {
+function stopPreview(videoEl: HTMLVideoElement | null = videoRef.value) {
   cleanupPlayers()
-  clearControlsHideTimeout()
+  resetPreviewScrub()
   showVideoControls.value = false
-  resetVideoElement(videoEl)
+  if (videoEl)
+    resetVideoElement(videoEl)
 }
 
 function getFullscreenElement() {
@@ -142,7 +163,6 @@ function syncPreviewFullscreenState() {
   emit('previewFullscreenChange', isFullscreen)
 
   if (isFullscreen) {
-    clearControlsHideTimeout()
     showVideoControls.value = true
     return
   }
@@ -155,10 +175,13 @@ function syncPreviewFullscreenState() {
     return
   }
 
-  showControlsTemporarily()
+  showControls()
 }
 
 function cleanupPlayers() {
+  previewGeneration++
+  previewEvents?.abort()
+  previewEvents = null
   if (hls) {
     hls.destroy()
     hls = null
@@ -176,10 +199,14 @@ function cleanupPlayers() {
 async function setupPreviewVideo(url: string, videoEl: HTMLVideoElement) {
   // Check if URL is FLV stream
   if (url.includes('.flv')) {
+    const generation = ++previewGeneration
     try {
       // 动态导入 flv.js 以避免构建时依赖问题
       const flvjsModule = await import('flv.js')
       const flvjs = flvjsModule.default
+
+      if (generation !== previewGeneration || !videoEl.isConnected)
+        return
 
       if (flvjs.isSupported()) {
         // Cleanup previous players and clear video src
@@ -215,18 +242,19 @@ async function setupPreviewVideo(url: string, videoEl: HTMLVideoElement) {
         })
 
         // 当有数据可以播放时立即播放
+        previewEvents = new AbortController()
         videoEl.addEventListener('loadeddata', () => {
           isLoadingStream.value = false
           videoEl.play().catch(() => {
             // Ignore autoplay errors
           })
-        }, { once: true })
+        }, { once: true, signal: previewEvents.signal })
 
         videoEl.addEventListener('canplay', () => {
           if (isLoadingStream.value) {
             isLoadingStream.value = false
           }
-        }, { once: true })
+        }, { once: true, signal: previewEvents.signal })
       }
     }
     catch (error) {
@@ -300,7 +328,8 @@ async function setupPreviewVideo(url: string, videoEl: HTMLVideoElement) {
         videoEl.removeEventListener('canplay', handleCanPlay)
       }
 
-      videoEl.addEventListener('canplay', handleCanPlay)
+      previewEvents = new AbortController()
+      videoEl.addEventListener('canplay', handleCanPlay, { once: true, signal: previewEvents.signal })
       videoEl.play().catch(() => {
         isLoadingStream.value = false
         // Ignore autoplay errors
@@ -310,7 +339,7 @@ async function setupPreviewVideo(url: string, videoEl: HTMLVideoElement) {
   else {
     cleanupPlayers()
     resetVideoElement(videoEl)
-    showControlsTemporarily()
+    showControls()
     videoEl.src = url
     videoEl.load()
     videoEl.play().catch(() => {
@@ -320,8 +349,11 @@ async function setupPreviewVideo(url: string, videoEl: HTMLVideoElement) {
 }
 
 // Watch for preview URL and videoRef changes
-watch([() => props.previewVideoUrl, () => props.isHover, videoRef], ([url, isHover, videoEl]) => {
-  isPreviewPlaying.value = false
+watch([() => props.previewVideoUrl, () => props.isHover, videoRef, isActive], ([url, isHover, videoEl, active]) => {
+  if (!active) {
+    stopPreview(videoEl)
+    return
+  }
 
   if (!videoEl)
     return
@@ -345,13 +377,12 @@ watch([shouldEnableVideoControls, () => props.previewVideoUrl, () => props.isHov
   }
 
   if (!controlsEnabled || !url || !isHover) {
-    clearControlsHideTimeout()
     showVideoControls.value = false
     return
   }
 
-  showControlsTemporarily()
-})
+  showControls()
+}, { immediate: true })
 
 // Cleanup on unmount
 onMounted(() => {
@@ -359,11 +390,25 @@ onMounted(() => {
   document.addEventListener('webkitfullscreenchange', syncPreviewFullscreenState as EventListener)
 })
 
+function deactivatePreview() {
+  isActive.value = false
+  stopPreview()
+  disposeSwipeSeek()
+  if (isPreviewFullscreen.value) {
+    isPreviewFullscreen.value = false
+    emit('previewFullscreenChange', false)
+  }
+}
+
+onActivated(() => {
+  isActive.value = true
+})
+onDeactivated(deactivatePreview)
+
 onBeforeUnmount(() => {
   document.removeEventListener('fullscreenchange', syncPreviewFullscreenState)
   document.removeEventListener('webkitfullscreenchange', syncPreviewFullscreenState as EventListener)
-  clearControlsHideTimeout()
-  cleanupPlayers()
+  deactivatePreview()
 })
 
 // Shadow styles are now injected globally via CSS variables from App.vue
@@ -373,17 +418,23 @@ onBeforeUnmount(() => {
 <template>
   <div
     class="group/cover"
+    :data-layout-edit-target="skeleton ? undefined : 'video-card-cover'"
+    :data-layout-settings-menu="skeleton ? undefined : 'BewlyComponents'"
+    :data-layout-settings-page="skeleton ? undefined : 'video-card'"
+    :data-layout-settings-title-key="skeleton ? undefined : 'settings.enable_video_preview'"
     shrink-0
-    relative bg="$bew-skeleton" rounded="$bew-radius"
+    relative bg="$bew-skeleton" rounded="$bew-media-radius"
     overflow-hidden
     cursor-pointer
     group-hover:z-2
     style="aspect-ratio: 16 / 9; contain: layout style; will-change: auto;"
+    @mouseenter="isCoverHovered = true"
+    @mouseleave="isCoverHovered = false"
   >
     <!-- Skeleton mode -->
     <div
       v-if="skeleton"
-      w-full h-full bg="$bew-skeleton" rounded="$bew-radius"
+      w-full h-full bg="$bew-skeleton" rounded="$bew-media-radius"
       style="aspect-ratio: 16 / 9;"
     />
 
@@ -393,7 +444,7 @@ onBeforeUnmount(() => {
       <LazyPicture
         :src="coverImageUrl"
         loading="lazy"
-        root-margin="96px"
+        :retain-screens="3"
         :show-skeleton="true"
         @loaded="emit('imageLoaded')"
       />
@@ -401,7 +452,7 @@ onBeforeUnmount(() => {
       <div
         v-if="removed"
         pos="absolute top-0 left-0" w-full h-fit aspect-video flex="~ col gap-2 items-center justify-center"
-        bg="$bew-fill-4" backdrop-blur-20px mix-blend-luminosity rounded="$bew-radius" z-2
+        bg="$bew-fill-4" backdrop-blur-20px mix-blend-luminosity rounded="$bew-media-radius" z-2
       >
         <p mb-2 color-white text-lg>
           {{ $t('video_card.video_removed') }}
@@ -420,17 +471,30 @@ onBeforeUnmount(() => {
       <!-- Video preview -->
       <Transition v-if="!removed && settings.enableVideoPreview" name="fade">
         <div
-          v-if="previewVideoUrl && (isHover || isPreviewFullscreen)"
-          pos="absolute top-0 left-0" w-full aspect-video rounded="$bew-radius" bg-black
-          @pointermove.capture="handlePreviewMouseMove"
+          v-if="isActive && previewVideoUrl && (isHover || isPreviewFullscreen)"
+          class="video-card-preview"
+          :class="{ 'video-card-preview--scrubbable': shouldEnableSwipeSeek }"
+          pos="absolute top-0 left-0" w-full aspect-video rounded="$bew-media-radius" bg-black
+          v-on="previewInteractionEvents"
         >
           <video
             ref="videoRef"
             autoplay muted
+            :draggable="false"
             :controls="showVideoControls"
             w-full h-full
-            @playing="handlePreviewPlaying"
           />
+
+          <div
+            v-if="isScrubbing && !shouldEnableVideoControls"
+            class="video-card-preview__scrub-progress"
+            aria-hidden="true"
+          >
+            <div
+              class="video-card-preview__scrub-progress-value"
+              :style="{ transform: `scaleX(${scrubProgress / 100})` }"
+            />
+          </div>
 
           <!-- Loading indicator -->
           <Transition name="fade">
@@ -451,10 +515,10 @@ onBeforeUnmount(() => {
       <!-- Ranking Number -->
       <div
         v-if="video?.rank"
+        class="video-card-overlay-transition"
         pos="absolute top-0"
         p-2
         :class="layout !== 'old' ? 'group-hover:opacity-0' : { 'opacity-0': shouldHideOverlayElements }"
-        duration-300
       >
         <div
           v-if="Number(video?.rank) <= 3"
@@ -462,7 +526,7 @@ onBeforeUnmount(() => {
           text-white rounded="1/2" shadow="$bew-shadow-1"
           border="1 $bew-theme-color"
           grid="~ place-content-center"
-          text="xl" fw-bold
+          class="video-card-rank-badge" text="xl"
         >
           {{ video?.rank }}
         </div>
@@ -479,7 +543,8 @@ onBeforeUnmount(() => {
       <template v-if="!removed && video">
         <!-- Old layout: Video Duration (right bottom) -->
         <div
-          v-if="layout === 'old' && (video?.duration || video?.durationStr)"
+          v-if="layout === 'old' && settings.showVideoCardDuration && (video?.duration || video?.durationStr)"
+          class="video-card-overlay-transition video-card-live-badge"
           pos="absolute bottom-0 right-0"
           z="2"
           p="x-2 y-1"
@@ -488,15 +553,14 @@ onBeforeUnmount(() => {
           text="!white xs"
           bg="black opacity-60"
           :class="{ 'opacity-0': shouldHideOverlayElements }"
-          duration-300
         >
           {{ video?.duration ? calcCurrentTime(video?.duration ?? 0) : video?.durationStr }}
         </div>
 
         <div
+          class="video-card-overlay-transform-transition"
           :class="coverTopLeftAlwaysVisible ? 'opacity-100' : 'opacity-0 group-hover/cover:opacity-100'"
           :transform="coverTopLeftAlwaysVisible ? 'scale-100' : 'scale-70 group-hover/cover:scale-100'"
-          duration-300
           pos="absolute top-0 left-0" z-2
           @click.stop=""
         >
@@ -504,10 +568,21 @@ onBeforeUnmount(() => {
         </div>
 
         <div
+          class="video-card-overlay-transform-transition"
+          :class="coverTopRightAlwaysVisible ? 'opacity-100' : 'opacity-0 group-hover/cover:opacity-100'"
+          :transform="coverTopRightAlwaysVisible ? 'scale-100' : 'scale-70 group-hover/cover:scale-100'"
+          pos="absolute top-0 right-0" z-2
+          @click.stop=""
+        >
+          <slot name="coverTopRight" />
+        </div>
+
+        <div
           v-if="video?.liveStatus === 1"
+          class="video-card-overlay-transition"
           :class="layout !== 'old' ? 'group-hover:opacity-0' : { 'opacity-0': shouldHideOverlayElements }"
-          pos="absolute left-0 top-0" bg="$bew-theme-color" text="xs white" fw-bold
-          p="x-2 y-1" m-1 inline-block rounded="$bew-radius" duration-300
+          pos="absolute left-0 top-0" bg="$bew-theme-color" text="xs white"
+          p="x-2 y-1" m-1 inline-block rounded="$bew-radius"
         >
           LIVE
           <i i-svg-spinners:pulse-3 align-middle mt--0.2em />
@@ -515,20 +590,21 @@ onBeforeUnmount(() => {
 
         <div
           v-if="Object.keys(video?.badge ?? {}).length > 0"
+          class="video-card-overlay-transition"
           :class="layout !== 'old' ? 'group-hover:opacity-0' : { 'opacity-0': shouldHideOverlayElements }"
           :style="{
             backgroundColor: video?.badge?.bgColor,
             color: video?.badge?.color,
           }"
           pos="absolute right-0 top-0" bg="$bew-theme-color" text="xs white"
-          p="x-2 y-1" m-1 inline-block rounded="$bew-radius" duration-300
+          p="x-2 y-1" m-1 inline-block rounded="$bew-radius"
         >
           {{ video?.badge?.text }}
         </div>
 
-        <!-- Watch later appears after preview playback starts, or after the non-preview hover delay. -->
+        <!-- Track cover hover separately so delayed preview playback does not delay this action. -->
         <div
-          v-if="showWatcherLater && shouldShowWatchLater"
+          v-if="showWatcherLater && isCoverHovered"
           role="button"
           tabindex="0"
           :aria-label="isInWatchLater ? $t('common.added') : $t('common.save_to_watch_later')"
@@ -537,9 +613,8 @@ onBeforeUnmount(() => {
           rounded="$bew-radius"
           text="!white xl"
           bg="black opacity-60"
-          class="opacity-0 group-hover/cover:opacity-100"
+          class="video-card-overlay-transform-transition opacity-0 group-hover/cover:opacity-100"
           transform="scale-70 group-hover/cover:scale-100"
-          duration-300
           @click.prevent.stop="emit('toggleWatchLater')"
           @keydown.enter.prevent.stop="emit('toggleWatchLater')"
           @keydown.space.prevent.stop="emit('toggleWatchLater')"
@@ -557,19 +632,10 @@ onBeforeUnmount(() => {
           v-if="layout !== 'old' && hasCoverStats"
           class="video-card-cover-stats video-card-stats"
           :class="{
-            'video-card-cover-stats--compact': layout === 'compact',
             'video-card-cover-stats--hidden': shouldHideCoverStats,
           }"
-          :style="coverStatsStyle"
         >
           <div class="video-card-cover-stats__items">
-            <span
-              v-if="coverStatsVisibility?.published"
-              class="video-card-cover-stats__item video-card-cover-stats__item--published"
-            >
-              <span class="video-card-cover-stats__value">{{ coverStatValues?.published }}</span>
-            </span>
-
             <span
               v-if="coverStatsVisibility?.view"
               class="video-card-cover-stats__item cover-stat-view"
@@ -602,12 +668,81 @@ onBeforeUnmount(() => {
             <span class="video-card-cover-stats__value">{{ coverStatValues?.duration }}</span>
           </span>
         </div>
+
+        <div
+          v-if="playbackProgress !== undefined"
+          class="video-card-playback-progress"
+          aria-hidden="true"
+        >
+          <Progress
+            :percentage="playbackProgress"
+            height="var(--bew-space-0-5)"
+          />
+        </div>
       </template>
     </template>
   </div>
 </template>
 
 <style lang="scss" scoped>
+.video-card-rank-badge,
+.video-card-live-badge {
+  font-weight: var(--bew-font-weight-bold);
+}
+
+.video-card-overlay-transition {
+  transition: opacity var(--bew-duration-moderate, 300ms) var(--bew-ease-standard, ease);
+}
+
+.video-card-overlay-transform-transition {
+  transition:
+    opacity var(--bew-duration-moderate, 300ms) var(--bew-ease-standard, ease),
+    transform var(--bew-duration-moderate, 300ms) var(--bew-ease-standard, ease);
+}
+
+.video-card-playback-progress {
+  position: absolute;
+  // 以圆角之间的底部直线段为完整进度范围，避免小进度被封面裁切。
+  right: var(--bew-media-radius);
+  bottom: 0;
+  left: var(--bew-media-radius);
+  z-index: 3;
+  pointer-events: none;
+}
+
+.video-card-preview--scrubbable {
+  cursor: ew-resize;
+  touch-action: pan-y;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+
+.video-card-preview--scrubbable video {
+  -webkit-user-drag: none;
+}
+
+.video-card-preview__scrub-progress {
+  position: absolute;
+  right: 0.5rem;
+  bottom: 0.5rem;
+  left: 0.5rem;
+  z-index: 3;
+  height: 0.25rem;
+  overflow: hidden;
+  border-radius: var(--bew-radius-full);
+  background: rgb(255 255 255 / 35%);
+  pointer-events: none;
+}
+
+.video-card-preview__scrub-progress-value {
+  width: 100%;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--bew-theme-color);
+  transform-origin: left center;
+  will-change: transform;
+}
+
 .video-card-cover-stats {
   position: absolute;
   left: 0;
@@ -621,6 +756,7 @@ onBeforeUnmount(() => {
     calc(var(--video-card-stats-font-size, 0.75rem) * 0.6) calc(var(--video-card-stats-font-size, 0.75rem) * 0.45);
   color: #fff;
   font-size: var(--video-card-stats-font-size, 0.75rem);
+  line-height: var(--video-card-stats-line-height, 1rem);
   opacity: 1;
   transition: opacity 0.2s ease;
   pointer-events: none;
@@ -654,15 +790,16 @@ onBeforeUnmount(() => {
 }
 
 .video-card-cover-stats__items {
-  display: inline-flex;
+  display: flex;
+  flex: 1 1 0;
   align-items: center;
+  align-content: flex-start;
   gap: 0.4rem;
-  white-space: nowrap;
-  flex-wrap: nowrap;
-  /* 不允许收缩，避免数字被截断 */
-  flex-shrink: 0;
-  /* 允许内容溢出，由容器查询控制显示 */
+  height: var(--video-card-stats-line-height, 1rem);
   min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+  flex-wrap: wrap;
 }
 
 .video-card-cover-stats__item {
@@ -680,40 +817,15 @@ onBeforeUnmount(() => {
 
 .video-card-cover-stats__value {
   font-size: var(--video-card-stats-font-size, 0.75rem);
-  line-height: 1;
+  line-height: var(--video-card-stats-line-height, 1rem);
 }
 
 .video-card-cover-stats__item--duration {
   margin-left: auto;
   font-size: var(--video-card-stats-font-size, 0.75rem);
-  /* 时长固定在最右侧，不收缩 */
+  /* 时长始终保留在右侧；左侧统计空间不足时会整项换行并被隐藏。 */
   flex-shrink: 0;
 }
-
-.video-card-cover-stats--compact {
-  --video-card-stats-overlay-scale: 1.1;
-  padding: calc(var(--video-card-stats-font-size, 0.75rem) * 0.5)
-    calc(var(--video-card-stats-font-size, 0.75rem) * 0.65);
-}
-
-.video-card-cover-stats--compact .video-card-cover-stats__items {
-  overflow: hidden;
-  flex-shrink: 1;
-}
-
-.video-card-cover-stats__item--published {
-  min-width: 0;
-  overflow: hidden;
-}
-
-.video-card-cover-stats__item--published .video-card-cover-stats__value {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-/* 响应式显示控制已移至 VideoCard.vue 的 coverStatsVisibility 计算属性 */
-/* 避免 CSS Container Query 在特定系统缩放（如 Windows 125%）下的性能问题 */
 
 .video-card-cover-stats--hidden {
   opacity: 0;
@@ -732,32 +844,6 @@ onBeforeUnmount(() => {
 @keyframes spin {
   to {
     transform: rotate(360deg);
-  }
-}
-
-/* ✅ 性能优化：从父组件 :deep() 移至本地 scoped，减少跨组件选择器匹配 */
-/* 播放量和时长始终显示，弹幕和点赞在较宽屏幕显示 */
-.cover-stat-view {
-  display: inline-flex; /* 播放量始终显示 */
-}
-
-.cover-stat-danmaku,
-.cover-stat-like {
-  display: none; /* 默认隐藏弹幕和点赞 */
-}
-
-/* 使用媒体查询代替容器查询（性能更好） */
-/* 屏幕宽度 > 768px 时显示弹幕 */
-@media (min-width: 768px) {
-  .cover-stat-danmaku {
-    display: inline-flex;
-  }
-}
-
-/* 屏幕宽度 > 1024px 时显示点赞 */
-@media (min-width: 1024px) {
-  .cover-stat-like {
-    display: inline-flex;
   }
 }
 </style>

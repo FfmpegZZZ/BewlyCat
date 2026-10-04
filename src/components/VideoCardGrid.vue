@@ -1,13 +1,21 @@
 <script setup lang="ts" generic="T = any">
 import { useDebounceFn } from '@vueuse/core'
 
-import type { Video } from '~/components/VideoCard/types'
+import type { Video, VideoCardState } from '~/components/VideoCard/types'
+import { createVideoCardState } from '~/components/VideoCard/types'
+import type { BewlyAppProvider } from '~/composables/useAppProvider'
+import type { CardWindowSnapshot } from '~/composables/useCardWindow'
+import { useCardWindow } from '~/composables/useCardWindow'
 import { useGridLayout } from '~/composables/useGridLayout'
+import { useHomeTabViewState } from '~/composables/useHomeTabState'
+import { useUserRelationScope } from '~/composables/useUserRelationScope'
 import { useVideoCardShadowStyle } from '~/composables/useVideoCardShadowStyle'
 import { OVERLAY_SCROLL_BAR_SCROLL } from '~/constants/globalEvents'
 import type { GridLayoutType } from '~/logic'
-import { settings } from '~/logic'
-import { getListLayoutColumnCount } from '~/utils/gridLayout'
+import { originalSettings, settings } from '~/logic'
+import { normalizeVideoCardCoverRatio } from '~/logic/storage'
+import { useUserRelationStore } from '~/stores/userRelationStore'
+import { getAdaptiveGridColumnCount, getListGridColumnCount } from '~/utils/gridLayout'
 import emitter from '~/utils/mitt'
 
 import SmoothLoading from './SmoothLoading.vue'
@@ -22,6 +30,8 @@ interface VideoCardGridProps<T = any> {
    * 数据列表
    */
   items: T[]
+  /** Distinguish multiple grids when their home tab caches data across unmounts. */
+  stateKey?: string
 
   /**
    * Grid 布局模式
@@ -37,6 +47,9 @@ interface VideoCardGridProps<T = any> {
    * 是否没有更多内容
    */
   noMoreContent?: boolean
+
+  /** Hide the end message when a parent coordinates multiple date groups. */
+  showNoMoreContent?: boolean
 
   /**
    * 是否需要先登录
@@ -68,6 +81,14 @@ interface VideoCardGridProps<T = any> {
    * 是否隐藏作者信息
    */
   hideAuthor?: boolean
+  hideWatchedBadge?: boolean
+
+  /**
+   * 是否关闭卡片的 content-visibility 估算。
+   * 普通分页页面可以启用它，避免卡片进入视口时由估算高度切换到真实高度。
+   * @default false
+   */
+  disableContentVisibility?: boolean
 
   /**
    * 数据转换函数：将原始数据转换为 VideoCard 所需的格式
@@ -78,6 +99,16 @@ interface VideoCardGridProps<T = any> {
    * 自定义卡片点击处理。未传入时 VideoCard 使用设置中的默认打开行为。
    */
   cardClickHandler?: (item: T, event: MouseEvent) => void
+
+  /**
+   * 观察卡片主链接点击，不接管 VideoCard 原有打开行为。
+   */
+  cardClickObserver?: (item: T, event: MouseEvent) => void
+
+  /**
+   * 卡片首次进入滚动视口时触发。
+   */
+  cardExposureHandler?: (item: T) => void
 
   /**
    * 是否让封面左上角插槽常驻显示。
@@ -166,11 +197,13 @@ interface VideoCardGridProps<T = any> {
 const props = withDefaults(defineProps<VideoCardGridProps<T>>(), {
   loading: false,
   noMoreContent: false,
+  showNoMoreContent: true,
   needToLoginFirst: false,
   showPreview: false,
   showWatchLater: true,
   moreBtn: true,
   initialSkeletonCount: 30,
+  disableContentVisibility: false,
   isSkeletonItem: undefined,
   enableRowPadding: false,
   showLoadingMoreSkeleton: true,
@@ -191,6 +224,19 @@ const gridContainerRef = ref<HTMLElement | null>(null)
 const loadMoreSentinelRef = ref<HTMLElement | null>(null)
 const isLoadMoreSentinelIntersecting = ref(false)
 const reachedLoadMoreDuringLoading = ref(false)
+const gridContainerWidth = ref(0)
+const bewlyApp = inject<BewlyAppProvider | undefined>('BEWLY_APP', undefined)
+const userRelationStore = useUserRelationStore()
+const tabState = useHomeTabViewState()
+const gridStateKey = `grid:${props.stateKey || 'default'}`
+interface GridSnapshot {
+  window: CardWindowSnapshot
+  cardStates: [string | number, VideoCardState][]
+  exposedKeys: (string | number)[]
+}
+const restoredGrid = tabState?.take<GridSnapshot | undefined>(gridStateKey, undefined)
+let detachGridSnapshot: (() => void) | undefined
+onBeforeUnmount(() => detachGridSnapshot?.())
 
 // 使用共享的 Grid 布局 composable（CSS 媒体查询驱动，无 JS 计算开销）
 const { gridClass, gridCssVars } = useGridLayout(() => props.gridLayout)
@@ -198,16 +244,9 @@ const { gridClass, gridCssVars } = useGridLayout(() => props.gridLayout)
 // 获取 shadow 样式变量（避免依赖外部传入）
 const { shadowStyleVars } = useVideoCardShadowStyle()
 
-// 骨架屏数量使用固定值，避免依赖列数计算
+// 首屏骨架数量固定为目标数量，避免 ref 挂载后重新计算列数导致骨架数量变化。
 const dynamicSkeletonCount = computed(() => {
-  // 估算视口高度能容纳的行数 (假设每个卡片平均400px高)
-  const rowsInViewport = Math.ceil(window.innerHeight / 400)
-  // 多加载1.5倍的视口内容作为缓冲，假设最多5列
-  const bufferedRows = Math.ceil(rowsInViewport * 1.5)
-  const estimatedColumns = 5
-  const totalCount = bufferedRows * estimatedColumns
-  // 不超过设定的上限
-  return Math.min(totalCount, props.initialSkeletonCount)
+  return normalizePositiveInt(props.initialSkeletonCount, 30)
 })
 
 // 递归加载保护机制
@@ -219,7 +258,7 @@ const lastItemsCount = ref(0)
 const consecutiveFailures = ref(0)
 const MAX_CONSECUTIVE_FAILURES = 3
 
-// 仅首屏空数据加载时显示骨架屏；滚动加载时不再向列表插入临时卡片。
+// 仅首屏空数据加载时显示骨架屏；滚动加载时直接追加真实卡片。
 const showInitialSkeleton = computed(() => {
   if (props.needToLoginFirst)
     return false
@@ -272,8 +311,16 @@ const displayItems = computed(() => {
   return props.items
 })
 
+function isDocumentVisible(): boolean {
+  return typeof document === 'undefined' || document.visibilityState === 'visible'
+}
+
 // 检查是否可以加载更多
 function canLoadMore(): boolean {
+  // 后台标签页里 IntersectionObserver 可能一直保持相交，不能继续预加载。
+  if (!isDocumentVisible())
+    return false
+
   // 连续请求失败次数超过限制时停止
   if (consecutiveFailures.value >= MAX_CONSECUTIVE_FAILURES) {
     return false
@@ -292,6 +339,9 @@ const loadMoreRequested = ref(false)
 let loadMoreRequestTimeout: number | null = null
 
 function triggerLoadMore() {
+  if (bewlyApp?.isHomeTabSwitching.value)
+    return
+
   if (canLoadMore()) {
     if (loadMoreRequested.value)
       return
@@ -313,8 +363,15 @@ function triggerLoadMore() {
 const supportsIntersectionObserver = typeof window !== 'undefined' && 'IntersectionObserver' in window
 const isFirefox = typeof navigator !== 'undefined' && /\bFirefox\//.test(navigator.userAgent)
 let intersectionObserver: IntersectionObserver | null = null
+let cardExposureObserver: IntersectionObserver | null = null
 let isGridActive = false
 let scrollListenersActive = false
+const cardExposureElements = new Map<string | number, HTMLElement>()
+const cardExposureItems = new WeakMap<HTMLElement, T>()
+const cardExposureKeys = new WeakMap<HTMLElement, string | number>()
+const exposedCardKeys = new Set<string | number>(restoredGrid?.exposedKeys)
+const mountedCards = new Map<string | number, { canRecycle?: boolean }>()
+const cardStates = new Map<string | number, VideoCardState>(restoredGrid?.cardStates.map(([key, state]) => [key, reactive(state)]))
 
 function cleanupIntersectionObserver() {
   if (intersectionObserver) {
@@ -322,6 +379,76 @@ function cleanupIntersectionObserver() {
     intersectionObserver = null
   }
   isLoadMoreSentinelIntersecting.value = false
+}
+
+function cleanupCardExposureObserver() {
+  cardExposureObserver?.disconnect()
+  cardExposureObserver = null
+}
+
+function setupCardExposureObserver() {
+  cleanupCardExposureObserver()
+  if (!supportsIntersectionObserver || !isGridActive || !props.cardExposureHandler)
+    return
+
+  cardExposureObserver = new IntersectionObserver(
+    (entries) => {
+      if (!isGridActive || !isDocumentVisible())
+        return
+
+      entries.forEach((entry) => {
+        if (!entry.isIntersecting)
+          return
+
+        const element = entry.target as HTMLElement
+        const item = cardExposureItems.get(element)
+        const key = cardExposureKeys.get(element)
+        if (item === undefined || key === undefined || exposedCardKeys.has(key))
+          return
+
+        exposedCardKeys.add(key)
+        cardExposureObserver?.unobserve(element)
+        props.cardExposureHandler?.(item)
+      })
+    },
+    {
+      root: findScrollElement(),
+      threshold: 0,
+    },
+  )
+
+  cardExposureElements.forEach((element, key) => {
+    if (!exposedCardKeys.has(key))
+      cardExposureObserver?.observe(element)
+  })
+}
+
+function setVideoCardElement(key: string | number, item: T, component: unknown) {
+  if (component)
+    mountedCards.set(key, component as { canRecycle?: boolean })
+  else
+    mountedCards.delete(key)
+
+  const previousElement = cardExposureElements.get(key)
+  if (previousElement) {
+    cardExposureObserver?.unobserve(previousElement)
+    cardExposureElements.delete(key)
+  }
+
+  if (!props.cardExposureHandler)
+    return
+
+  const element = component instanceof Element
+    ? component
+    : (component as { $el?: unknown } | null)?.$el
+  if (!(element instanceof HTMLElement))
+    return
+
+  cardExposureElements.set(key, element)
+  cardExposureItems.set(element, item)
+  cardExposureKeys.set(element, key)
+  if (!exposedCardKeys.has(key))
+    cardExposureObserver?.observe(element)
 }
 
 function setupIntersectionObserver() {
@@ -339,7 +466,7 @@ function setupIntersectionObserver() {
 
   intersectionObserver = new IntersectionObserver(
     (entries) => {
-      if (!isGridActive)
+      if (!isGridActive || !isDocumentVisible())
         return
 
       const entry = entries[0]
@@ -372,7 +499,7 @@ let checkPreloadRAF: number | null = null
 
 // 检查是否需要预加载
 function checkShouldPreload() {
-  if (!isGridActive)
+  if (!isGridActive || !isDocumentVisible())
     return
 
   if (props.loading) {
@@ -382,6 +509,10 @@ function checkShouldPreload() {
   }
 
   if (!canLoadMore())
+    return
+
+  // 关闭填满首屏时，短列表的哨兵会一直相交；不能据此把全部历史刷完。
+  if (!props.showLoadingMoreSkeleton && !isListOverflowing())
     return
 
   // 优先使用 IntersectionObserver 的结果。
@@ -396,6 +527,9 @@ function checkShouldPreload() {
 
   checkPreloadRAF = requestAnimationFrame(() => {
     checkPreloadRAF = null
+
+    if (!isGridActive || !isDocumentVisible())
+      return
 
     if (isWithinPreloadDistance())
       triggerLoadMore()
@@ -413,10 +547,12 @@ function handleScroll() {
 }
 
 function handleResize() {
+  const width = gridContainerRef.value?.clientWidth
+  if (width && Math.abs(width - gridContainerWidth.value) > 0.5)
+    gridContainerWidth.value = width
   debouncedCheck()
 }
 
-// 设置滚动监听
 function setupScrollListeners() {
   if (scrollListenersActive)
     return
@@ -434,7 +570,6 @@ function setupScrollListeners() {
   window.addEventListener('resize', handleResize, { passive: true })
 }
 
-// 清理滚动监听
 function cleanupScrollListeners() {
   if (!scrollListenersActive)
     return
@@ -491,7 +626,7 @@ watch(() => props.loading, (newLoading, oldLoading) => {
     nextTick(() => {
       // 用户可能在请求结束前刚好滚到底部。此时 sentinel 没有新的相交变化，
       // 直接按滚动容器几何位置补触发，避免丢掉这次 loadMore。
-      if (isScrollAtBottom()) {
+      if (isScrollAtBottom() && (props.showLoadingMoreSkeleton || isListOverflowing())) {
         triggerLoadMore()
         return
       }
@@ -524,6 +659,7 @@ watch(() => props.items.length, (newCount, oldCount) => {
     consecutiveFailures.value = 0
     lastItemsCount.value = 0
     reachedLoadMoreDuringLoading.value = false
+    exposedCardKeys.clear()
     return
   }
 
@@ -557,18 +693,29 @@ watch(loadMoreSentinelRef, () => {
   setupIntersectionObserver()
 })
 
+watch(() => bewlyApp?.isHomeTabSwitching.value, (switching) => {
+  if (!switching && isGridActive) {
+    nextTick(() => {
+      checkShouldPreload()
+    })
+  }
+})
+
 function activateGrid() {
   if (isGridActive)
     return
 
   isGridActive = true
   setupScrollListeners()
+  setupGridResizeObserver()
+  document.addEventListener('visibilitychange', handleDocumentVisibilityChange)
 
   nextTick(() => {
     if (!isGridActive)
       return
 
     setupIntersectionObserver()
+    setupCardExposureObserver()
     checkShouldPreload()
   })
 }
@@ -578,8 +725,11 @@ function deactivateGrid() {
     return
 
   isGridActive = false
+  document.removeEventListener('visibilitychange', handleDocumentVisibilityChange)
   cleanupScrollListeners()
   cleanupIntersectionObserver()
+  cleanupCardExposureObserver()
+  cleanupGridResizeObserver()
 
   if (checkPreloadRAF !== null) {
     cancelAnimationFrame(checkPreloadRAF)
@@ -604,6 +754,11 @@ onUnmounted(() => {
     cancelAnimationFrame(checkPreloadRAF)
     checkPreloadRAF = null
   }
+  cleanupGridResizeObserver()
+  cardExposureElements.clear()
+  exposedCardKeys.clear()
+  mountedCards.clear()
+  cardStates.clear()
   resetTransformCaches()
 })
 
@@ -614,15 +769,52 @@ const isHorizontal = computed(() => {
   return props.gridLayout !== 'adaptive'
 })
 
-// 合并 shadow 样式变量和 grid 列数变量
+// A configurable breakpoint cannot be expressed with a CSS container query
+// value, so the measured container width toggles the single-column class.
+const isAutoSwitchSingleColumn = computed(() => {
+  if (props.gridLayout !== 'twoColumns' || !settings.value.autoSwitchListLayout)
+    return false
+
+  const width = gridContainerWidth.value || gridContainerRef.value?.clientWidth || 0
+  if (!width)
+    return false
+
+  return getListGridColumnCount(
+    props.gridLayout,
+    width,
+    true,
+    settings.value.autoSwitchListLayoutBreakpoint,
+  ) === 1
+})
+
+const horizontalCoverRatio = computed(() => {
+  const useOneColumnRatio = props.gridLayout === 'oneColumn' || isAutoSwitchSingleColumn.value
+  const fallback = useOneColumnRatio
+    ? originalSettings.videoCardCoverRatioOneColumn
+    : originalSettings.videoCardCoverRatioTwoColumns
+  const value = useOneColumnRatio
+    ? settings.value.videoCardCoverRatioOneColumn
+    : settings.value.videoCardCoverRatioTwoColumns
+
+  return normalizeVideoCardCoverRatio(value, fallback)
+})
+
+// 合并 shadow、grid 列数和横向卡片宽度分配变量。
 const gridContainerStyle = computed(() => ({
   ...shadowStyleVars.value,
   ...gridCssVars.value,
+  '--video-card-cover-flex': horizontalCoverRatio.value,
+  '--video-card-info-flex': 100 - horizontalCoverRatio.value,
 }))
+
+const renderedGridClass = computed(() => [
+  ...gridClass.value,
+  ...(isAutoSwitchSingleColumn.value ? ['grid-list-auto-switch-single'] : []),
+])
 
 // 判断是否应该显示空状态（确认无更多内容且数据为空）
 const showEmptyState = computed(() => {
-  return props.noMoreContent && props.items.length === 0 && !props.needToLoginFirst
+  return !props.loading && props.noMoreContent && props.items.length === 0 && !props.needToLoginFirst
 })
 
 function normalizePositiveInt(value: unknown, fallback: number): number {
@@ -632,29 +824,15 @@ function normalizePositiveInt(value: unknown, fallback: number): number {
   return Math.max(1, Math.round(normalized))
 }
 
-function getAdaptiveGridColumns(width: number): number {
-  const gridColumns = settings.value.gridColumns
-
-  if (width >= 1536)
-    return normalizePositiveInt(gridColumns.xxl, 6)
-  if (width >= 1280)
-    return normalizePositiveInt(gridColumns.xl, 5)
-  if (width >= 1024)
-    return normalizePositiveInt(gridColumns.lg, 4)
-  if (width >= 768)
-    return normalizePositiveInt(gridColumns.md, 3)
-  if (width >= 640)
-    return normalizePositiveInt(gridColumns.sm, 2)
-
-  return normalizePositiveInt(gridColumns.base, 1)
-}
-
 function getCurrentColumnCount(layout: GridLayoutType, width: number): number {
-  if (layout === 'twoColumns')
-    return 2
-  if (layout === 'oneColumn')
-    return getListLayoutColumnCount(width)
-  return getAdaptiveGridColumns(width)
+  if (layout === 'adaptive')
+    return getAdaptiveGridColumnCount(width, settings.value.gridColumns)
+  return getListGridColumnCount(
+    layout,
+    width,
+    settings.value.autoSwitchListLayout,
+    settings.value.autoSwitchListLayoutBreakpoint,
+  )
 }
 
 function findScrollElement(): HTMLElement | null {
@@ -681,9 +859,20 @@ function getRemainingScroll(scrollElement: HTMLElement): number {
   return scrollElement.scrollHeight - scrollElement.clientHeight - scrollElement.scrollTop
 }
 
+function isUsableScrollElement(scrollElement: HTMLElement | null): scrollElement is HTMLElement {
+  return !!scrollElement && scrollElement.clientHeight > 0 && scrollElement.scrollHeight > 0
+}
+
+function isListOverflowing(): boolean {
+  const scrollElement = findScrollElement()
+  if (!isUsableScrollElement(scrollElement))
+    return false
+  return scrollElement.scrollHeight > scrollElement.clientHeight + 1
+}
+
 function isWithinPreloadDistance(): boolean {
   const scrollElement = findScrollElement()
-  if (!scrollElement)
+  if (!isUsableScrollElement(scrollElement))
     return false
 
   return getRemainingScroll(scrollElement) <= getPreloadDistance(scrollElement)
@@ -691,11 +880,62 @@ function isWithinPreloadDistance(): boolean {
 
 function isScrollAtBottom(): boolean {
   const scrollElement = findScrollElement()
-  if (!scrollElement)
+  if (!isUsableScrollElement(scrollElement))
     return false
 
   return getRemainingScroll(scrollElement) <= 2
 }
+
+function handleDocumentVisibilityChange() {
+  if (!isDocumentVisible()) {
+    isLoadMoreSentinelIntersecting.value = false
+    reachedLoadMoreDuringLoading.value = false
+    return
+  }
+
+  if (!isGridActive)
+    return
+
+  nextTick(() => {
+    if (!isGridActive || !isDocumentVisible())
+      return
+    setupIntersectionObserver()
+    checkShouldPreload()
+  })
+}
+
+let gridResizeObserver: ResizeObserver | null = null
+
+function cleanupGridResizeObserver() {
+  gridResizeObserver?.disconnect()
+  gridResizeObserver = null
+}
+
+function setupGridResizeObserver() {
+  cleanupGridResizeObserver()
+  if (!isGridActive)
+    return
+
+  const container = gridContainerRef.value
+  if (!container)
+    return
+
+  gridContainerWidth.value = Math.max(1, container.clientWidth || window.innerWidth)
+  if (typeof ResizeObserver === 'undefined')
+    return
+
+  gridResizeObserver = new ResizeObserver((entries) => {
+    const width = entries[0]?.contentRect.width
+    if (!width || Math.abs(width - gridContainerWidth.value) <= 0.5)
+      return
+    gridContainerWidth.value = width
+  })
+  gridResizeObserver.observe(container)
+}
+
+watch(gridContainerRef, () => {
+  setupGridResizeObserver()
+})
 
 // 类型定义：每个 VideoCard 的渲染所需数据
 interface VideoCardRenderItem {
@@ -759,11 +999,98 @@ function createRenderItem(item: T, index: number): VideoCardRenderItem {
   return { key, index, item, skeleton, type, video }
 }
 
-// 普通追加渲染：按 displayItems 顺序保留所有已加载卡片，
-// 对齐 B 站原生首页的连续滚动体验，不做虚拟窗口回收。
-const renderItems = computed<VideoCardRenderItem[]>(() => {
-  return displayItems.value.map((item, index) => createRenderItem(item, index))
+const cardWindowRoot = computed(() => {
+  // Track both the grid mount and the App viewport replacement across page switches.
+  void gridContainerRef.value
+  void bewlyApp?.scrollViewportRef.value
+  return findScrollElement()
 })
+// Homepage tabs always restore through the card window; other lists keep the
+// small-list fast path.
+const recycleCards = computed(() => !!tabState?.enabled || props.items.length > 80)
+const cardColumns = computed(() => getCurrentColumnCount(props.gridLayout, gridContainerWidth.value || 1200))
+const cardGap = computed(() => isHorizontal.value ? 16 : 20)
+// Only the key index spans the feed. Scrolling never rebuilds it.
+const cardKeys = computed(() => displayItems.value.map(getUniqueKey))
+const estimatedCardHeight = computed(() => {
+  const width = gridContainerWidth.value || 1200
+  const columns = cardColumns.value
+  const cardWidth = Math.max(1, (width - (columns - 1) * cardGap.value) / columns)
+  const coverHeight = isHorizontal.value
+    ? Math.max(1, cardWidth - 24) * horizontalCoverRatio.value / 100 * 9 / 16
+    : cardWidth * 9 / 16
+  return isHorizontal.value ? Math.max(coverHeight, 130) + 16 : coverHeight + 110
+})
+const cardLayoutKey = computed(() => [
+  props.gridLayout,
+  settings.value.videoCardLayout,
+  settings.value.videoCardTitleFontSize,
+  settings.value.videoCardAuthorFontSize,
+  settings.value.videoCardMetaFontSize,
+  settings.value.showVideoCardAuthorAvatar,
+  settings.value.showVideoCardAuthorName,
+  settings.value.showVideoCardVideoTag,
+  settings.value.showVideoCardRecommendTag,
+  settings.value.showVideoCardPublishTime,
+  settings.value.showVideoCardViewCount,
+  settings.value.showVideoCardDanmakuCount,
+  props.hideAuthor,
+].join(':'))
+const cardWindow = useCardWindow({
+  root: cardWindowRoot,
+  container: gridContainerRef,
+  keys: cardKeys,
+  columns: cardColumns,
+  gap: cardGap,
+  enabled: recycleCards,
+  estimatedHeight: estimatedCardHeight,
+  layout: cardLayoutKey,
+  canRelease: key => mountedCards.get(key)?.canRecycle !== false,
+  snapshot: restoredGrid?.window,
+  restoreScroll: tabState?.restoreScroll,
+})
+detachGridSnapshot = tabState?.capture(gridStateKey, (): GridSnapshot => ({
+  window: cardWindow.captureSnapshot(),
+  cardStates: [...cardStates],
+  exposedKeys: [...exposedCardKeys],
+}))
+
+// Skipped rows use full-width spacers, so both slot DOM and VNodes stay bounded.
+const renderItems = computed(() => {
+  const result: { key: string, height?: number, card?: VideoCardRenderItem }[] = []
+  for (const range of cardWindow.ranges.value) {
+    if (range.height !== undefined) {
+      result.push({ key: `spacer:${range.start}`, height: range.height })
+      continue
+    }
+    for (let index = range.start; index < range.end; index++) {
+      const card = createRenderItem(displayItems.value[index], index)
+      result.push({ key: `card:${typeof card.key}:${card.key}`, card })
+    }
+  }
+  return result
+})
+
+function getCardState(key: string | number) {
+  let state = cardStates.get(key)
+  if (!state) {
+    state = reactive(createVideoCardState())
+    cardStates.set(key, state)
+  }
+  return state
+}
+
+watch(cardKeys, (keys) => {
+  const validKeys = new Set(keys)
+  for (const key of cardStates.keys()) {
+    if (!validKeys.has(key))
+      cardStates.delete(key)
+  }
+  for (const key of exposedCardKeys) {
+    if (!validKeys.has(key))
+      exposedCardKeys.delete(key)
+  }
+}, { immediate: true })
 
 interface VideoTransformCacheEntry<T = any> {
   item: T
@@ -781,7 +1108,7 @@ watch(() => props.transformItem, () => {
 })
 
 watch(
-  () => renderItems.value.map(item => item.key),
+  () => renderItems.value.flatMap(item => item.card ? [item.card.key] : []),
   (activeKeys) => {
     const activeKeySet = new Set(activeKeys)
 
@@ -814,6 +1141,39 @@ function getTransformedVideo(item: T, key: string | number): Video | undefined {
     return undefined
   }
 }
+
+const relationQueryMids = computed(() => {
+  const accountMid = userRelationStore.accountMid
+  if (!accountMid || !props.moreBtn || !settings.value.showVideoCardMoreButton
+    || props.isFollowingPage || bewlyApp?.isHomeTabSwitching.value
+    || (tabState && !tabState.isCurrent())) {
+    return []
+  }
+
+  const needsRelationships = ['followUser', 'blockUser'].some(key =>
+    settings.value.videoCardContextMenuConfig.find(item => item.key === key)?.visible ?? true,
+  )
+  if (!needsRelationships)
+    return []
+
+  const mids = new Set<number>()
+  const { start, end } = cardWindow.loadingRange.value
+  for (let index = start; index < end; index++) {
+    const card = createRenderItem(displayItems.value[index], index)
+    if (card.skeleton || card.type === 'bangumi')
+      continue
+    const author = Array.isArray(card.video?.author) ? card.video.author[0] : card.video?.author
+    const mid = author?.mid
+    if (typeof mid !== 'number' || !Number.isSafeInteger(mid) || mid <= 0
+      || mid === accountMid || typeof author?.followed === 'boolean') {
+      continue
+    }
+    mids.add(mid)
+  }
+  return [...mids]
+})
+
+useUserRelationScope(relationQueryMids, relationQueryMids)
 
 // 处理登录
 function handleLogin() {
@@ -871,30 +1231,47 @@ function getUniqueKey(item: T, index: number): string | number {
       v-else
       ref="gridContainerRef"
       class="video-card-grid-container"
-      :class="[gridClass, { 'is-firefox': isFirefox }]"
+      :class="[
+        renderedGridClass,
+        { 'is-firefox': isFirefox },
+      ]"
       m="b-0 t-0" relative w-full
       :style="gridContainerStyle"
     >
-      <VideoCard
+      <div
         v-for="renderItem in renderItems"
         :key="renderItem.key"
-        :data-index="renderItem.index"
-        :skeleton="renderItem.skeleton"
-        :type="renderItem.type"
-        :video="renderItem.video"
-        :show-preview="showPreview"
-        :show-watcher-later="showWatchLater"
-        :horizontal="isHorizontal"
-        :more-btn="moreBtn"
-        :hide-author="hideAuthor"
-        :is-following-page="props.isFollowingPage"
-        :custom-click-handler="props.cardClickHandler ? (event: MouseEvent) => props.cardClickHandler?.(renderItem.item, event) : undefined"
-        :cover-top-left-always-visible="props.coverTopLeftAlwaysVisible"
+        :ref="(element) => renderItem.card && cardWindow.setElement(renderItem.card.key, element)"
+        :class="renderItem.card ? 'video-card-slot' : 'video-card-spacer'"
+        :data-index="renderItem.card?.index"
+        :style="renderItem.card ? undefined : { height: `${renderItem.height}px` }"
+        :aria-hidden="renderItem.card ? undefined : true"
       >
-        <template v-for="(_, name) in $slots" #[name]>
-          <slot :name="name" :item="renderItem.item" />
-        </template>
-      </VideoCard>
+        <VideoCard
+          v-if="renderItem.card"
+          :ref="(component: unknown) => setVideoCardElement(renderItem.card!.key, renderItem.card!.item, component)"
+          :data-index="renderItem.card.index"
+          :skeleton="renderItem.card.skeleton"
+          :type="renderItem.card.type"
+          :video="renderItem.card.video"
+          :persistent-state="getCardState(renderItem.card.key)"
+          :show-preview="showPreview"
+          :show-watcher-later="showWatchLater"
+          :horizontal="isHorizontal"
+          :more-btn="moreBtn"
+          :hide-author="hideAuthor"
+          :hide-watched-badge="hideWatchedBadge"
+          :disable-content-visibility="props.disableContentVisibility || recycleCards"
+          :is-following-page="props.isFollowingPage"
+          :custom-click-handler="props.cardClickHandler ? (event: MouseEvent) => props.cardClickHandler?.(renderItem.card!.item, event) : undefined"
+          :primary-click-observer="props.cardClickObserver ? (event: MouseEvent) => props.cardClickObserver?.(renderItem.card!.item, event) : undefined"
+          :cover-top-left-always-visible="props.coverTopLeftAlwaysVisible"
+        >
+          <template v-for="(_, name) in $slots" #[name]>
+            <slot :name="name" :item="renderItem.card.item" />
+          </template>
+        </VideoCard>
+      </div>
 
       <div ref="loadMoreSentinelRef" class="load-more-sentinel" aria-hidden="true" />
     </div>
@@ -908,7 +1285,7 @@ function getUniqueKey(item: T, index: number): string | number {
     />
 
     <!-- 无更多内容提示（仅在有数据时显示，避免与空列表提示重复） -->
-    <Empty v-if="noMoreContent && !needToLoginFirst && items.length > 0" class="pb-4" :description="$t('common.no_more_content')">
+    <Empty v-if="showNoMoreContent && noMoreContent && !needToLoginFirst && items.length > 0" class="pb-4" :description="$t('common.no_more_content')">
       <Button type="primary" @click="handleRefresh">
         {{ refreshButtonText || $t('common.operation.refresh') }}
       </Button>
@@ -918,10 +1295,22 @@ function getUniqueKey(item: T, index: number): string | number {
 
 <style lang="scss" scoped>
 .video-card-grid-root {
+  container-type: inline-size;
+}
+
+.video-card-slot {
+  display: flow-root;
+  min-width: 0;
   overflow-anchor: none;
 }
 
-// Grid 布局 - 使用 Tailwind CSS 标准媒体断点 + CSS 变量控制列数
+.video-card-spacer {
+  grid-column: 1 / -1;
+  pointer-events: none;
+  overflow-anchor: none;
+}
+
+// Grid 布局 - 根据设置页声明的容器断点和 CSS 变量控制列数
 .grid-adaptive {
   display: grid;
   gap: 20px;
@@ -930,31 +1319,31 @@ function getUniqueKey(item: T, index: number): string | number {
   align-items: stretch;
 }
 
-@media (min-width: 640px) {
+@container (min-width: 640px) {
   .grid-adaptive {
     grid-template-columns: repeat(var(--grid-cols-sm, 2), 1fr);
   }
 }
 
-@media (min-width: 768px) {
+@container (min-width: 768px) {
   .grid-adaptive {
     grid-template-columns: repeat(var(--grid-cols-md, 3), 1fr);
   }
 }
 
-@media (min-width: 1024px) {
+@container (min-width: 1024px) {
   .grid-adaptive {
     grid-template-columns: repeat(var(--grid-cols-lg, 4), 1fr);
   }
 }
 
-@media (min-width: 1280px) {
+@container (min-width: 1280px) {
   .grid-adaptive {
     grid-template-columns: repeat(var(--grid-cols-xl, 5), 1fr);
   }
 }
 
-@media (min-width: 1536px) {
+@container (min-width: 1536px) {
   .grid-adaptive {
     grid-template-columns: repeat(var(--grid-cols-xxl, 6), 1fr);
   }
@@ -968,52 +1357,18 @@ function getUniqueKey(item: T, index: number): string | number {
   align-items: stretch;
 }
 
-@supports (container-type: inline-size) {
-  .video-card-grid-root {
-    container-type: inline-size;
-  }
-
-  .grid-adaptive {
-    grid-template-columns: repeat(var(--grid-cols-base, 1), 1fr);
-  }
-
-  @container (min-width: 640px) {
-    .grid-adaptive {
-      grid-template-columns: repeat(var(--grid-cols-sm, 2), 1fr);
-    }
-  }
-
-  @container (min-width: 768px) {
-    .grid-adaptive {
-      grid-template-columns: repeat(var(--grid-cols-md, 3), 1fr);
-    }
-  }
-
-  @container (min-width: 1024px) {
-    .grid-adaptive {
-      grid-template-columns: repeat(var(--grid-cols-lg, 4), 1fr);
-    }
-  }
-
-  @container (min-width: 1280px) {
-    .grid-adaptive {
-      grid-template-columns: repeat(var(--grid-cols-xl, 5), 1fr);
-    }
-  }
-
-  @container (min-width: 1536px) {
-    .grid-adaptive {
-      grid-template-columns: repeat(var(--grid-cols-xxl, 6), 1fr);
-    }
-  }
-}
-
 .grid-one-column {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 500px), 1fr));
+  grid-template-columns: repeat(1, minmax(0, 1fr));
   gap: 16px;
   contain: layout style;
   align-items: stretch;
+}
+
+// The single-column state is toggled by the measured grid container width so
+// users can choose a breakpoint instead of being locked to 640px.
+.grid-two-columns.grid-list-auto-switch-single {
+  grid-template-columns: repeat(1, minmax(0, 1fr));
 }
 
 .video-card-grid-container {

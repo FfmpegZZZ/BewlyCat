@@ -18,11 +18,11 @@ export function getCookie(name: string): string {
  * @param name cookie name
  * @param value cookie value
  */
-export function setCookie(name: string, value: any, expDays: number) {
+export function setCookie(name: string, value: string, expDays: number) {
   const date = new Date()
   date.setTime(date.getTime() + expDays * 24 * 60 * 60 * 1000)
   const expires = `expires=${date.toUTCString()}`
-  document.cookie = `${name}=${value}; ${expires}; domain=.bilibili.com; path=/`
+  document.cookie = `${name}=${encodeURIComponent(value)}; ${expires}; domain=.bilibili.com; path=/`
 }
 
 /**
@@ -125,13 +125,41 @@ export function hexToHSL(hex: string, alpha: number | null = null): string {
   return `hsl(${h}, ${s}%, ${l}%)`
 }
 
+const pendingSmoothScrolls = new WeakMap<HTMLElement, () => void>()
+
+export function isProgrammaticScrollActive(element: HTMLElement): boolean {
+  return pendingSmoothScrolls.has(element)
+}
+
 /**
- * Smooth scroll to the top of the html element
+ * Smooth scroll to the top of the html element.
+ * Card virtualization must not restore an anchor during this navigation.
  */
 export function scrollToTop(element: HTMLElement, targetScrollTop = 0 as number) {
+  pendingSmoothScrolls.get(element)?.()
   // cancel if already on top
   if (element.scrollTop === targetScrollTop)
     return
+
+  const doc = element.ownerDocument
+  let timeout: ReturnType<typeof setTimeout>
+  const finish = () => {
+    clearTimeout(timeout)
+    element.removeEventListener('scrollend', finish)
+    element.removeEventListener('wheel', finish)
+    element.removeEventListener('touchstart', finish)
+    doc.removeEventListener('pointerdown', finish, true)
+    doc.removeEventListener('keydown', finish, true)
+    pendingSmoothScrolls.delete(element)
+  }
+  // Also release the guard when scrolling is interrupted, or scrollend is unavailable.
+  timeout = setTimeout(finish, 3000)
+  pendingSmoothScrolls.set(element, finish)
+  element.addEventListener('scrollend', finish, { passive: true })
+  element.addEventListener('wheel', finish, { passive: true })
+  element.addEventListener('touchstart', finish, { passive: true })
+  doc.addEventListener('pointerdown', finish, true)
+  doc.addEventListener('keydown', finish, true)
 
   element.scrollTo({
     top: targetScrollTop,
@@ -168,6 +196,44 @@ export function isHomePage(url: string = location.href): boolean {
     const isHttp = urlObj.protocol === 'http:' || urlObj.protocol === 'https:'
     const isBilibiliHomeHost = urlObj.hostname === 'www.bilibili.com' || urlObj.hostname === 'bilibili.com'
     return isHttp && isBilibiliHomeHost && (urlObj.pathname === '/' || urlObj.pathname === '/index.html')
+  }
+  catch {
+    return false
+  }
+}
+
+/**
+ * 判断实际首页，排除复用首页路径的搜索、历史等 BewlyCat 内置页面。
+ */
+export function isActualHomepage(url: string = location.href): boolean {
+  if (!isHomePage(url))
+    return false
+
+  const page = new URL(url).searchParams.get('page')
+  return page === null || page === 'Home'
+}
+
+/**
+ * Check if the URL points to Bilibili's watch later list page.
+ * Supports both the canonical path and the legacy hash route used by the
+ * user-space favorites entry. See https://github.com/keleus/BewlyCat/issues/841
+ *
+ * @param url the url to check
+ * @returns true if the URL is a watch later list page
+ */
+export function isWatchLaterListPage(url: string): boolean {
+  try {
+    const urlObj = new URL(url)
+    const isHttp = urlObj.protocol === 'http:' || urlObj.protocol === 'https:'
+    const isBilibiliHost = urlObj.hostname === 'www.bilibili.com' || urlObj.hostname === 'bilibili.com'
+    if (!isHttp || !isBilibiliHost)
+      return false
+
+    if (urlObj.pathname === '/watchlater/list' || urlObj.pathname === '/watchlater/list/')
+      return true
+
+    const isLegacyWatchLaterPath = urlObj.pathname === '/watchlater' || urlObj.pathname === '/watchlater/'
+    return isLegacyWatchLaterPath && /^#\/list(?:[/?]|$)/.test(urlObj.hash)
   }
   catch {
     return false
@@ -451,6 +517,7 @@ export function isInIframe(): boolean {
  */
 const BILIBILI_TRACKING_PARAMS = [
   'spm_id_from',
+  'hcfrom',
   'vd_source',
   'share_source',
   'share_medium',
@@ -467,7 +534,6 @@ const BILIBILI_TRACKING_PARAMS = [
   'buvid',
   'is_story_h5',
   'mid',
-  'p',
   'plat_id',
   'share_from',
   'timestamp',
@@ -486,7 +552,12 @@ export function cleanBilibiliUrl(url: string): string {
     const urlObj = new URL(url)
 
     // Only clean bilibili.com URLs
-    if (!urlObj.hostname.includes('bilibili.com') && !urlObj.hostname.includes('b23.tv'))
+    const hostname = urlObj.hostname.toLowerCase()
+    const isBilibiliHost = hostname === 'bilibili.com'
+      || hostname === 'b23.tv'
+      || hostname.endsWith('.bilibili.com')
+      || hostname.endsWith('.b23.tv')
+    if (!isBilibiliHost)
       return url
 
     // Remove tracking parameters

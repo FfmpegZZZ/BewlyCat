@@ -26,24 +26,24 @@ const otherLinks = computed(() => {
 
 <template>
   <div
-    style="backdrop-filter: var(--bew-filter-glass-1);"
-    h="[calc(100vh-100px)]" max-h="445px"
+    mt-2
+    h="fit" max-h="[calc(100vh-120px)]"
     w="fit"
     of-y-auto of-x-hidden
-    shadow="[var(--bew-shadow-3),var(--bew-shadow-edge-glow-1)]"
+    shadow="$bew-shadow-3"
     bg="$bew-elevated-alt"
-    rounded="$bew-radius"
-    border="1 $bew-border-color"
+    border="1 $bew-popover-border-color"
     class="channels-pop bew-popover"
     data-key="channels"
   >
     <div
+      class="bew-popover-inset"
       flex="~ gap-1"
-      p="4" w-inherit
+      w-inherit
     >
       <ul
-        v-for="(item, index) in [0, 10, 20, 30]"
-        :key="index"
+        v-for="item in [0, 10, 20, 30]"
+        :key="item"
         class="link-list"
       >
         <li
@@ -62,13 +62,9 @@ const otherLinks = computed(() => {
           </ALink>
         </li>
       </ul>
-      <ul
-        v-for="(item, index) in [0]"
-        :key="index"
-        class="link-list"
-      >
+      <ul class="link-list">
         <li
-          v-for="otherLink in otherLinks.slice(item, item + 10)"
+          v-for="otherLink in otherLinks.slice(0, 10)"
           :key="otherLink.name"
           class="link-item group"
         >
@@ -106,8 +102,8 @@ const otherLinks = computed(() => {
   --uno: "mb-1 last-of-type:mb-0 text-sm";
 
   a {
-    --uno: "flex items-center text-nowrap min-w-160px h-38px p-2 pr-3 rounded-$bew-radius duration-300";
-    --uno: "hover:bg-$bew-fill-alt hover:shadow-[var(--bew-shadow-1),var(--bew-shadow-edge-glow-1)]";
+    --uno: "flex items-center text-nowrap min-w-160px h-38px py-2 pl-4 pr-3 rounded-$bew-menu-item-radius duration-300";
+    --uno: "hover:bg-$bew-fill-2";
   }
 }
 

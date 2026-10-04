@@ -1,15 +1,45 @@
 import { settings } from '~/logic'
+import type { CustomPlayOrderContext, RandomPlayOrder } from '~/logic/storage'
+import { i18n } from '~/utils/i18n'
+
+import { applyAutoPlayByVideoType, detectVideoType, disableNativeEndPlaybackBehavior, doesEndBehaviorAllowCustomAdvance, getVideoElement, isPlayerEndingPanelVisible, isPlayerShowingAdvertisement, setCustomEndPlaybackHandlerActive, supportsCustomPlaybackForVideoType, VideoType } from './player'
 
 // 随机播放状态管理
 let isRandomPlayEnabled = false
 let isRandomPlayInitialized = false
-const visitedEpisodes: Set<number> = new Set()
-let originalEndedListener: (() => void) | null = null
-let originalPauseListener: (() => void) | null = null
+let randomPlayInitTimer: ReturnType<typeof setTimeout> | null = null
+const visitedEpisodes = new Set<string>()
+let originalEndedListener: ((event: Event) => void) | null = null
+let originalDurationListener: (() => void) | null = null
+let originalTimeUpdateListener: (() => void) | null = null
+let listenerVideo: HTMLVideoElement | null = null
+let videoObserver: MutationObserver | null = null
+let randomPlayInitGeneration = 0
 let userManuallySetRandomPlay = false // 用户手动设置的随机播放状态标志
+let customEpisodeOrder: string[] = []
+let activePlayOrder: RandomPlayOrder | null = null
+let playlistEditorController: AbortController | null = null
+let pageChangeObserver: MutationObserver | null = null
+let pageChangeDebounceTimer: ReturnType<typeof setTimeout> | null = null
+let pageChangeRebuildTimer: ReturnType<typeof setTimeout> | null = null
+let playlistEditorButton: HTMLButtonElement | null = null
+let playlistEditorStyle: HTMLStyleElement | null = null
+const manualPlayStateStorageKey = 'bewly-custom-play-state'
+let manualPlayContextKey: string | null = null
+const originalEpisodeOrders = new Map<HTMLElement, { priority: string, value: string }>()
+const originalEpisodeDraggable = new Map<HTMLElement, boolean>()
+const visuallyOrderedParents = new Set<HTMLElement>()
+const RANDOM_PLAY_INIT_MAX_ATTEMPTS = 100
+
+interface EpisodeEntry {
+  element: HTMLElement
+  key: string
+  title: string
+}
 
 const episodeRootSelector = [
   '.video-pod',
+  '.video-pod__list',
   '.multi-page',
   '.video-sections-content-list',
   '.base-video-sections-v1',
@@ -18,29 +48,112 @@ const episodeRootSelector = [
 ].join(', ')
 
 function queryEpisodeItems(selector: string): HTMLElement[] {
-  const directItems = Array.from(document.querySelectorAll(selector)) as HTMLElement[]
   const scopedItems = Array.from(document.querySelectorAll(episodeRootSelector))
     .flatMap(root => Array.from(root.querySelectorAll(selector)) as HTMLElement[])
+  if (scopedItems.length > 0)
+    return Array.from(new Set(scopedItems))
 
-  return Array.from(new Set([...directItems, ...scopedItems]))
+  return Array.from(document.querySelectorAll(selector)) as HTMLElement[]
+}
+
+function t(key: string): string {
+  const locale = settings.value.language || i18n.global.locale.value
+  return String(i18n.global.t(key, {}, { locale }))
+}
+
+function getActivePlayOrder(): RandomPlayOrder {
+  return activePlayOrder ?? getEffectiveCustomPlayOrder() ?? 'sequential'
+}
+
+function getVideoTypeCustomPlayOrder(): RandomPlayOrder | null {
+  if (!settings.value.enableCustomPlayOrderOverrides)
+    return null
+
+  let context: CustomPlayOrderContext | null = null
+  switch (detectVideoType()) {
+    case VideoType.MULTIPART:
+      context = 'multipart'
+      break
+    case VideoType.COLLECTION:
+      context = 'collection'
+      break
+    case VideoType.WATCH_LATER:
+      context = 'watchLater'
+      break
+    case VideoType.PLAYLIST:
+      context = 'playlist'
+      break
+  }
+
+  if (!context)
+    return null
+
+  const order = settings.value.customPlayOrderOverrides[context]
+  return order === 'sequential' || order === 'reverse' || order === 'random' ? order : null
+}
+
+function getDefaultCustomPlayOrder(): RandomPlayOrder | null {
+  if (!supportsCustomPlaybackForVideoType())
+    return null
+
+  const order = settings.value.defaultCustomPlayOrder
+  return order === 'sequential' || order === 'reverse' || order === 'random' ? order : null
+}
+
+function getEffectiveCustomPlayOrder(): RandomPlayOrder | null {
+  if (!settings.value.enableRandomPlay)
+    return null
+
+  return getVideoTypeCustomPlayOrder() ?? getDefaultCustomPlayOrder()
+}
+
+function shouldCustomPlayHandleEnd(): boolean {
+  return isRandomPlayEnabled && doesEndBehaviorAllowCustomAdvance()
+}
+
+function isGenuineCustomPlayEnd(
+  video: HTMLVideoElement,
+  event: Event,
+  state: { durationChangedAt: number, hasPlayedContent: boolean },
+): boolean {
+  if (event.target !== video || getVideoElement() !== video)
+    return false
+
+  // 结束面板已出现时，可以确认是正片播完，而不是广告被插件打断。
+  if (isPlayerEndingPanelVisible())
+    return true
+
+  if (isPlayerShowingAdvertisement())
+    return false
+
+  // 广告屏蔽插件常在 durationchange 后立刻把广告 seek 到结尾，从而触发 ended/pause。
+  if (Date.now() - state.durationChangedAt < 4000)
+    return false
+
+  if (!state.hasPlayedContent)
+    return false
+
+  return video.ended || event.type === 'ended'
+}
+
+function detachCustomPlayVideoListeners(): void {
+  if (listenerVideo && originalEndedListener)
+    listenerVideo.removeEventListener('ended', originalEndedListener, true)
+  if (listenerVideo && originalDurationListener)
+    listenerVideo.removeEventListener('durationchange', originalDurationListener)
+  if (listenerVideo && originalTimeUpdateListener)
+    listenerVideo.removeEventListener('timeupdate', originalTimeUpdateListener)
+
+  originalEndedListener = null
+  originalDurationListener = null
+  originalTimeUpdateListener = null
+  listenerVideo?.removeAttribute('data-bewly-random-play-listener')
+  listenerVideo = null
 }
 
 // 获取随机播放文本
 export function getRandomPlayText(): string {
-  // 尝试获取扩展设置的语言
-  const htmlLang = document.querySelector('html')?.getAttribute('lang')
-  const i18nLang = document.querySelector('html')?.getAttribute('data-i18n')
-
-  // 判断语言类型
-  if (i18nLang === 'en' || htmlLang === 'en') {
-    return 'Random Play'
-  }
-  else if (htmlLang === 'zh-TW' || htmlLang === 'zh-Hant') {
-    return '隨機播放'
-  }
-  else {
-    return '随机播放' // 默认简体中文
-  }
+  return t('settings.random_play')
 }
 
 // 获取视频选集
@@ -51,6 +164,11 @@ export function getVideoEpisodes(): HTMLElement[] {
   if (episodes.length > 0) {
     return episodes
   }
+
+  // 新版合集会直接以 simple-base-item 作为选集项。
+  const simpleBaseEpisodes = queryEpisodeItems('.simple-base-item')
+  if (simpleBaseEpisodes.length > 0)
+    return simpleBaseEpisodes
 
   // 合集视频选集（稍后再看、收藏夹等），只在明确的选集容器内查找，避免扫描评论区
   const collectionEpisodes = Array.from(document.querySelectorAll(episodeRootSelector))
@@ -67,56 +185,297 @@ export function getVideoEpisodes(): HTMLElement[] {
   return []
 }
 
+const recommendationRootSelector = [
+  '[class*="recommend_wrap"]',
+  '.recommend-list-v1',
+  '.recommend-list',
+  '.rec-list',
+  '.next-play',
+].join(', ')
+
+function findCustomPlayControlsHost(): HTMLElement | null {
+  // A single-video page can still expose an auto-play control for the
+  // recommendation list. Custom order controls belong only to a real episode
+  // playlist, never to that recommendation block.
+  if (detectVideoType() === VideoType.RECOMMEND)
+    return null
+
+  const episodes = getVideoEpisodes()
+  if (episodes.length === 0)
+    return null
+
+  const candidates = Array.from(document.querySelectorAll<HTMLElement>('.auto-play, .continuous-btn'))
+    .filter(candidate => !candidate.closest(recommendationRootSelector))
+  const episodeCandidate = candidates.find((candidate) => {
+    const root = candidate.closest(episodeRootSelector)
+    return !!root && episodes.some(episode => root.contains(episode))
+  })
+  if (episodeCandidate?.parentElement)
+    return episodeCandidate.parentElement
+
+  // 新版合集（包括搬入 Bewly 宽屏的列表）可能不再提供原生连播开关。
+  // 控件挂在实际包含选集的合集标题区，随原生列表一起搬入/移出宽屏。
+  const header = Array.from(document.querySelectorAll<HTMLElement>('.video-pod > .video-pod__header'))
+    .find(header => !header.closest(recommendationRootSelector)
+      && episodes.some(episode => header.parentElement?.contains(episode)))
+  return header ?? candidates[0]?.parentElement ?? null
+}
+
+function normalizeEpisodeText(value: string | null | undefined): string {
+  return value?.replace(/\s+/g, ' ').trim() ?? ''
+}
+
+function getEpisodeLink(episode: HTMLElement): HTMLAnchorElement | null {
+  return episode.matches('a[href]')
+    ? episode as HTMLAnchorElement
+    : episode.querySelector<HTMLAnchorElement>('a[href]')
+}
+
+function getEpisodeBaseKey(episode: HTMLElement, index: number): string {
+  const datasetKey = [
+    episode.dataset.bvid,
+    episode.dataset.aid,
+    episode.dataset.cid,
+    episode.dataset.key,
+    episode.dataset.index,
+  ].find(Boolean)
+  if (datasetKey)
+    return `data:${datasetKey}`
+
+  const link = getEpisodeLink(episode)
+  if (link?.href) {
+    try {
+      const url = new URL(link.href, location.href)
+      const page = url.searchParams.get('p')
+      return `url:${url.pathname}${page ? `?p=${page}` : ''}`
+    }
+    catch {
+      return `url:${link.getAttribute('href')}`
+    }
+  }
+
+  const title = normalizeEpisodeText(
+    episode.getAttribute('title')
+    ?? episode.getAttribute('aria-label')
+    ?? episode.querySelector<HTMLElement>('[title], .title, .title-txt, .name, .video-name')?.textContent
+    ?? episode.textContent,
+  )
+  return `text:${title || index}`
+}
+
+function getEpisodeTitle(episode: HTMLElement, index: number): string {
+  const titleElement = episode.querySelector<HTMLElement>(
+    '.title, .title-txt, .name, .video-name, .video-pod__item-text, .page-part',
+  )
+  return normalizeEpisodeText(
+    episode.getAttribute('aria-label')
+    ?? episode.getAttribute('title')
+    ?? titleElement?.getAttribute('title')
+    ?? titleElement?.textContent
+    ?? episode.textContent,
+  ) || `${index + 1}`
+}
+
+function getEpisodeEntries(episodes = getVideoEpisodes()): EpisodeEntry[] {
+  const keyOccurrences = new Map<string, number>()
+  return episodes.map((element, index) => {
+    const baseKey = getEpisodeBaseKey(element, index)
+    const occurrence = keyOccurrences.get(baseKey) ?? 0
+    keyOccurrences.set(baseKey, occurrence + 1)
+    return {
+      element,
+      key: `${baseKey}#${occurrence}`,
+      title: getEpisodeTitle(element, index),
+    }
+  })
+}
+
+interface ManualPlayState {
+  contextKey: string
+  enabled: boolean
+  order: RandomPlayOrder
+}
+
+function getCurrentPlayContextKey(): string | null {
+  const entries = getEpisodeEntries()
+  if (entries.length <= 1)
+    return null
+  return entries.map(entry => entry.key).sort().join('|')
+}
+
+function readManualPlayState(): ManualPlayState | null {
+  const contextKey = getCurrentPlayContextKey()
+  if (!contextKey)
+    return null
+
+  try {
+    const value = sessionStorage.getItem(manualPlayStateStorageKey)
+    if (!value)
+      return null
+    const state = JSON.parse(value) as Partial<ManualPlayState>
+    if (
+      state.contextKey !== contextKey
+      || typeof state.enabled !== 'boolean'
+      || (state.order !== 'sequential' && state.order !== 'reverse' && state.order !== 'random')
+    ) {
+      return null
+    }
+    return state as ManualPlayState
+  }
+  catch {
+    return null
+  }
+}
+
+function saveManualPlayState(): void {
+  const contextKey = getCurrentPlayContextKey()
+  if (!contextKey)
+    return
+  manualPlayContextKey = contextKey
+
+  try {
+    sessionStorage.setItem(manualPlayStateStorageKey, JSON.stringify({
+      contextKey,
+      enabled: isRandomPlayEnabled,
+      order: getActivePlayOrder(),
+    } satisfies ManualPlayState))
+  }
+  catch {
+    // 隐私模式或站点存储被禁用时仍保留当前页面内的行为。
+  }
+}
+
+function restoreManualPlayState(): boolean {
+  const state = readManualPlayState()
+  if (!state)
+    return false
+
+  activePlayOrder = state.order
+  isRandomPlayEnabled = state.enabled
+  manualPlayContextKey = state.contextKey
+  userManuallySetRandomPlay = true
+  return true
+}
+
+function orderEpisodeEntries(entries: EpisodeEntry[]): EpisodeEntry[] {
+  if (customEpisodeOrder.length === 0)
+    return entries
+
+  const orderIndex = new Map(customEpisodeOrder.map((key, index) => [key, index]))
+  return [...entries].sort((a, b) => {
+    const aIndex = orderIndex.get(a.key)
+    const bIndex = orderIndex.get(b.key)
+    if (aIndex === undefined && bIndex === undefined)
+      return 0
+    if (aIndex === undefined)
+      return 1
+    if (bIndex === undefined)
+      return -1
+    return aIndex - bIndex
+  })
+}
+
+function getPlaybackEpisodeEntries(): EpisodeEntry[] {
+  return orderEpisodeEntries(getEpisodeEntries())
+}
+
 // 获取当前选集索引
 export function getCurrentEpisodeIndex(episodes: HTMLElement[]): number {
-  const currentIndex = episodes.findIndex((episode) => {
+  const activeStateSelector = [
+    '.video-pod__item.active',
+    '.simple-base-item.active',
+    '.multip-list-item-active',
+    '.page-item.active',
+    '.list-item.active',
+    '.episode-item.active',
+    '.section-item.active',
+    '.collect-item.active',
+    '[aria-current="true"]',
+    '[aria-selected="true"]',
+    '[data-active="true"]',
+  ].join(', ')
+  const activeIndex = episodes.findIndex((episode) => {
     return episode.classList.contains('active')
       || episode.classList.contains('current')
       || episode.classList.contains('on')
+      || episode.classList.contains('multip-list-item-active')
+      || episode.matches(activeStateSelector)
+      || episode.querySelector(activeStateSelector) !== null
   })
-  return currentIndex >= 0 ? currentIndex : 0
+  if (activeIndex >= 0)
+    return activeIndex
+
+  const currentUrl = new URL(location.href)
+  const currentPath = currentUrl.pathname.replace(/\/$/, '')
+  const currentPage = currentUrl.searchParams.get('p') ?? '1'
+  const urlIndex = episodes.findIndex((episode) => {
+    const link = getEpisodeLink(episode)
+    if (!link?.href)
+      return false
+    try {
+      const episodeUrl = new URL(link.href, location.href)
+      return episodeUrl.pathname.replace(/\/$/, '') === currentPath
+        && (episodeUrl.searchParams.get('p') ?? '1') === currentPage
+    }
+    catch {
+      return false
+    }
+  })
+  return urlIndex >= 0 ? urlIndex : 0
 }
 
 // 获取随机下一集
 export function getRandomNextEpisode(episodes: HTMLElement[], currentIndex: number): number {
-  console.log('[BewlyCat Random Play] getRandomNextEpisode called, currentIndex:', currentIndex, 'visitedEpisodes:', Array.from(visitedEpisodes))
-
   if (episodes.length <= 1)
     return currentIndex
 
+  const episodeKeys = getEpisodeEntries(episodes).map(entry => entry.key)
+  const currentKey = episodeKeys[currentIndex]
+  if (currentKey)
+    visitedEpisodes.add(currentKey)
+
   // 如果所有视频都已访问，重置访问记录
   if (visitedEpisodes.size >= episodes.length) {
-    console.log('[BewlyCat Random Play] All episodes visited, resetting')
     visitedEpisodes.clear()
-    visitedEpisodes.add(currentIndex)
+    if (currentKey)
+      visitedEpisodes.add(currentKey)
   }
 
   // 获取未访问的视频索引
   const unvisitedIndices = episodes
     .map((_, index) => index)
-    .filter(index => !visitedEpisodes.has(index))
-
-  console.log('[BewlyCat Random Play] Unvisited indices:', unvisitedIndices)
+    .filter(index => !visitedEpisodes.has(episodeKeys[index]))
 
   if (unvisitedIndices.length === 0) {
-    console.log('[BewlyCat Random Play] No unvisited indices, selecting random excluding current')
     // 如果没有未访问的视频，随机选择一个不是当前视频的
     const availableIndices = episodes
       .map((_, index) => index)
       .filter(index => index !== currentIndex)
 
     if (availableIndices.length === 0) {
-      console.log('[BewlyCat Random Play] No available indices')
       return currentIndex
     }
     const selected = availableIndices[Math.floor(Math.random() * availableIndices.length)]
-    console.log('[BewlyCat Random Play] Selected from available:', selected)
     return selected
   }
 
   const selected = unvisitedIndices[Math.floor(Math.random() * unvisitedIndices.length)]
-  console.log('[BewlyCat Random Play] Selected from unvisited:', selected)
   return selected
+}
+
+export function getNextEpisodeIndex(
+  episodes: HTMLElement[],
+  currentIndex: number,
+  order: RandomPlayOrder,
+): number {
+  if (episodes.length <= 1)
+    return currentIndex
+
+  if (order === 'sequential')
+    return (currentIndex + 1) % episodes.length
+  if (order === 'reverse')
+    return (currentIndex - 1 + episodes.length) % episodes.length
+  return getRandomNextEpisode(episodes, currentIndex)
 }
 
 // 跳转到指定选集
@@ -126,23 +485,20 @@ export function jumpToEpisode(episodes: HTMLElement[], targetIndex: number): voi
   }
 
   const targetEpisode = episodes[targetIndex]
-  console.log('[BewlyCat Random Play] Target episode element:', targetEpisode)
-
+  const targetKey = getEpisodeEntries(episodes)[targetIndex]?.key
   // 尝试多种方式找到可点击的元素
   let clickableElement: HTMLElement | null = null
 
   // 1. 优先查找链接
-  const link = targetEpisode.querySelector('a') as HTMLAnchorElement
-  console.log('[BewlyCat Random Play] Found link:', link, 'href:', link?.href)
-
+  const link = targetEpisode.matches('a[href]')
+    ? targetEpisode as HTMLAnchorElement
+    : targetEpisode.querySelector<HTMLAnchorElement>('a[href]')
   if (link && link.href) {
     clickableElement = link
   }
   else {
     // 2. 查找 .simple-base-item 元素（B站新版播放列表项）
     const simpleBaseItem = targetEpisode.querySelector('.simple-base-item') as HTMLElement
-    console.log('[BewlyCat Random Play] Found .simple-base-item:', simpleBaseItem)
-
     if (simpleBaseItem) {
       clickableElement = simpleBaseItem
     }
@@ -160,67 +516,25 @@ export function jumpToEpisode(episodes: HTMLElement[], targetIndex: number): voi
   }
 
   if (!clickableElement) {
-    console.log('[BewlyCat Random Play] No clickable element found')
     return
   }
-
-  console.log('[BewlyCat Random Play] Clickable element:', clickableElement)
 
   // 使用更智能的点击策略
   const performClick = () => {
     try {
-      console.log('[BewlyCat Random Play] Attempting to click element:', targetIndex, clickableElement)
-
       // 标记为已访问（在点击前标记，防止点击失败后重复尝试）
-      visitedEpisodes.add(targetIndex)
+      if (targetKey)
+        visitedEpisodes.add(targetKey)
 
       // 如果是链接，尝试点击
       if (clickableElement instanceof HTMLAnchorElement && clickableElement.href) {
-        console.log('[BewlyCat Random Play] Clicking anchor element, href:', clickableElement.href)
         clickableElement.click()
         return
       }
 
-      // 对于没有链接的元素（如 video-pod__item），模拟真实点击
-      console.log('[BewlyCat Random Play] Simulating click on element')
-
-      // 方法1: 直接点击
+      // 对于没有链接的元素（如 video-pod__item），只触发一次点击。
+      // 重复派发 click 会让 B 站 Vue 路由执行两次卸载流程。
       clickableElement!.click()
-
-      // 方法2: 触发 mousedown -> mouseup -> click 事件序列（模拟真实点击）
-      setTimeout(() => {
-        const mouseDownEvent = new MouseEvent('mousedown', {
-          bubbles: true,
-          cancelable: true,
-          view: window,
-          button: 0,
-          buttons: 1,
-        })
-        clickableElement!.dispatchEvent(mouseDownEvent)
-
-        setTimeout(() => {
-          const mouseUpEvent = new MouseEvent('mouseup', {
-            bubbles: true,
-            cancelable: true,
-            view: window,
-            button: 0,
-            buttons: 0,
-          })
-          clickableElement!.dispatchEvent(mouseUpEvent)
-
-          setTimeout(() => {
-            const clickEvent = new MouseEvent('click', {
-              bubbles: true,
-              cancelable: true,
-              view: window,
-              button: 0,
-              detail: 1,
-            })
-            clickableElement!.dispatchEvent(clickEvent)
-            console.log('[BewlyCat Random Play] Click sequence completed')
-          }, 10)
-        }, 10)
-      }, 10)
     }
     catch (error) {
       console.error('[BewlyCat Random Play] Click failed:', error)
@@ -232,54 +546,276 @@ export function jumpToEpisode(episodes: HTMLElement[], targetIndex: number): voi
   performClick()
 }
 
+function createEditIcon(): SVGSVGElement {
+  const namespace = 'http://www.w3.org/2000/svg'
+  const svg = document.createElementNS(namespace, 'svg')
+  svg.setAttribute('viewBox', '0 0 24 24')
+  svg.setAttribute('width', '16')
+  svg.setAttribute('height', '16')
+  svg.setAttribute('aria-hidden', 'true')
+  const path = document.createElementNS(namespace, 'path')
+  path.setAttribute('fill', 'currentColor')
+  path.setAttribute('d', 'M4 16.5V20h3.5L17.8 9.7l-3.5-3.5L4 16.5Zm16.7-9.6a1 1 0 0 0 0-1.4l-2.2-2.2a1 1 0 0 0-1.4 0l-1.7 1.7 3.5 3.5 1.8-1.6Z')
+  svg.appendChild(path)
+  return svg
+}
+
+function ensurePlaylistEditorStyle(): void {
+  if (playlistEditorStyle?.isConnected)
+    return
+
+  playlistEditorStyle = document.createElement('style')
+  playlistEditorStyle.textContent = `
+    .bewly-random-play-order-parent {
+      display: flex !important;
+      flex-direction: column !important;
+    }
+    .bewly-random-play-editing-item {
+      position: relative !important;
+      cursor: grab !important;
+      user-select: none !important;
+      outline: 1px dashed var(--bew-theme-color, #00aeec) !important;
+      outline-offset: -1px !important;
+    }
+    .bewly-random-play-editing-item:active {
+      cursor: grabbing !important;
+    }
+    .bewly-random-play-dragging-item {
+      opacity: 0.45 !important;
+    }
+    .random-play-edit-btn.is-editing {
+      color: #fff !important;
+      background: var(--bew-theme-color, #00aeec) !important;
+    }
+  `
+  document.head.appendChild(playlistEditorStyle)
+}
+
+function applyCustomEpisodeVisualOrder(): void {
+  if (customEpisodeOrder.length === 0)
+    return
+
+  const entries = orderEpisodeEntries(getEpisodeEntries())
+  const parents = new Set(entries.map(entry => entry.element.parentElement).filter((parent): parent is HTMLElement => Boolean(parent)))
+  for (const parent of parents) {
+    const display = getComputedStyle(parent).display
+    if (display !== 'flex' && display !== 'inline-flex' && display !== 'grid' && display !== 'inline-grid') {
+      parent.classList.add('bewly-random-play-order-parent')
+      visuallyOrderedParents.add(parent)
+    }
+  }
+
+  entries.forEach((entry, index) => {
+    if (!originalEpisodeOrders.has(entry.element)) {
+      originalEpisodeOrders.set(entry.element, {
+        value: entry.element.style.getPropertyValue('order'),
+        priority: entry.element.style.getPropertyPriority('order'),
+      })
+    }
+    entry.element.style.setProperty('order', String(index), 'important')
+  })
+}
+
+function clearCustomEpisodeVisualOrder(): void {
+  for (const [element, originalOrder] of originalEpisodeOrders) {
+    if (originalOrder.value)
+      element.style.setProperty('order', originalOrder.value, originalOrder.priority)
+    else
+      element.style.removeProperty('order')
+  }
+  originalEpisodeOrders.clear()
+  for (const parent of visuallyOrderedParents)
+    parent.classList.remove('bewly-random-play-order-parent')
+  visuallyOrderedParents.clear()
+}
+
+function updatePlaylistEditorButton(editing: boolean): void {
+  if (!playlistEditorButton)
+    return
+  playlistEditorButton.classList.toggle('is-editing', editing)
+  playlistEditorButton.title = editing
+    ? t('settings.random_play_finish_editing')
+    : t('settings.random_play_edit_playlist')
+  playlistEditorButton.setAttribute('aria-label', playlistEditorButton.title)
+  playlistEditorButton.setAttribute('aria-pressed', String(editing))
+}
+
+function stopNativePlaylistEditing(): void {
+  playlistEditorController?.abort()
+  playlistEditorController = null
+  for (const [element, draggable] of originalEpisodeDraggable) {
+    element.draggable = draggable
+    element.classList.remove('bewly-random-play-editing-item', 'bewly-random-play-dragging-item')
+  }
+  originalEpisodeDraggable.clear()
+  updatePlaylistEditorButton(false)
+}
+
+function reorderNativePlaylistItem(sourceKey: string, targetKey: string, insertAfter: boolean): void {
+  const orderedKeys = getPlaybackEpisodeEntries().map(entry => entry.key)
+  const sourceIndex = orderedKeys.indexOf(sourceKey)
+  const targetIndex = orderedKeys.indexOf(targetKey)
+  if (sourceIndex < 0 || targetIndex < 0 || sourceIndex === targetIndex)
+    return
+
+  orderedKeys.splice(sourceIndex, 1)
+  const adjustedTargetIndex = orderedKeys.indexOf(targetKey)
+  orderedKeys.splice(adjustedTargetIndex + (insertAfter ? 1 : 0), 0, sourceKey)
+  customEpisodeOrder = orderedKeys
+  visitedEpisodes.clear()
+  applyCustomEpisodeVisualOrder()
+}
+
+function startNativePlaylistEditing(button: HTMLButtonElement): void {
+  stopNativePlaylistEditing()
+  const entries = getPlaybackEpisodeEntries()
+  if (entries.length <= 1) {
+    button.title = t('settings.random_play_edit_playlist_empty')
+    return
+  }
+
+  ensurePlaylistEditorStyle()
+  playlistEditorButton = button
+  playlistEditorController = new AbortController()
+  const { signal } = playlistEditorController
+  let draggedKey = ''
+  let draggedParent: HTMLElement | null = null
+
+  applyCustomEpisodeVisualOrder()
+  for (const entry of entries) {
+    const { element, key } = entry
+    originalEpisodeDraggable.set(element, element.draggable)
+    element.draggable = true
+    element.classList.add('bewly-random-play-editing-item')
+    element.addEventListener('dragstart', (event) => {
+      draggedKey = key
+      draggedParent = element.parentElement
+      element.classList.add('bewly-random-play-dragging-item')
+      event.dataTransfer?.setData('text/plain', key)
+      if (event.dataTransfer)
+        event.dataTransfer.effectAllowed = 'move'
+    }, { signal })
+    element.addEventListener('dragover', (event) => {
+      if (!draggedKey || draggedKey === key || element.parentElement !== draggedParent)
+        return
+      event.preventDefault()
+      const rect = element.getBoundingClientRect()
+      const insertAfter = event.clientY > rect.top + rect.height / 2
+      reorderNativePlaylistItem(draggedKey, key, insertAfter)
+    }, { signal })
+    element.addEventListener('drop', event => event.preventDefault(), { signal })
+    element.addEventListener('dragend', () => {
+      draggedKey = ''
+      draggedParent = null
+      element.classList.remove('bewly-random-play-dragging-item')
+    }, { signal })
+    element.addEventListener('click', (event) => {
+      event.preventDefault()
+      event.stopImmediatePropagation()
+    }, { capture: true, signal })
+  }
+
+  document.addEventListener('keydown', (event) => {
+    if (event.key !== 'Escape')
+      return
+    event.preventDefault()
+    event.stopPropagation()
+    stopNativePlaylistEditing()
+  }, { signal })
+  updatePlaylistEditorButton(true)
+}
+
+function toggleNativePlaylistEditing(button: HTMLButtonElement): void {
+  if (playlistEditorController)
+    stopNativePlaylistEditing()
+  else
+    startNativePlaylistEditing(button)
+}
+
 // 创建随机播放UI
 export function createRandomPlayUI(): HTMLElement | null {
-  // 查找自动连播按钮的容器
-  const autoPlayContainer = document.querySelector('.auto-play')
-  if (!autoPlayContainer)
+  const controlsHost = findCustomPlayControlsHost()
+  if (!controlsHost)
     return null
 
   // 检查是否已存在随机播放按钮
-  if (document.querySelector('.random-play-btn'))
-    return null
+  const existingRandomPlay = document.querySelector<HTMLElement>('.random-play')
+  if (existingRandomPlay) {
+    if (existingRandomPlay.closest(recommendationRootSelector)) {
+      existingRandomPlay.remove()
+    }
+    else {
+      mountCustomPlayControls(existingRandomPlay, controlsHost)
+      return existingRandomPlay
+    }
+  }
 
-  // 创建随机播放按钮容器
+  // 创建播放顺序控件容器
   const randomPlayContainer = document.createElement('div')
   randomPlayContainer.className = 'random-play'
   randomPlayContainer.style.cssText = `
     margin-left: 12px;
+    display: flex;
+    align-items: center;
+    gap: 6px;
   `
 
-  // 创建随机播放按钮
+  // 创建播放顺序选择与开关
   const randomPlayBtn = document.createElement('div')
   randomPlayBtn.className = 'random-play-btn'
-
   randomPlayBtn.style.cssText = `
     display: flex;
     align-items: center;
-    cursor: pointer;
+    gap: 6px;
     font-size: 14px;
-    color: var(--text3);
+    color: var(--text3, #9499a0);
     user-select: none;
   `
 
-  // 创建文本
-  const txtEl = document.createElement('div')
-  txtEl.className = 'txt'
-  txtEl.textContent = getRandomPlayText()
-  txtEl.style.cssText = `
-    margin-right: 4px;
+  const orderSelect = document.createElement('select')
+  orderSelect.className = 'random-play-order-select'
+  orderSelect.setAttribute('aria-label', getRandomPlayText())
+  orderSelect.title = getRandomPlayText()
+  orderSelect.style.cssText = `
+    width: auto;
+    min-width: 0;
+    flex-shrink: 0;
+    height: 26px;
+    padding: 0 var(--bew-space-1, 4px);
+    cursor: pointer;
+    color: var(--text2, #61666d);
+    background: var(--bg2, #f6f7f8);
+    border: 1px solid var(--line_regular, #e3e5e7);
+    border-radius: 6px;
+    font: inherit;
   `
+  const orderOptions: Array<{ label: string, value: RandomPlayOrder }> = [
+    { label: t('settings.random_play_order_sequential'), value: 'sequential' },
+    { label: t('settings.random_play_order_reverse'), value: 'reverse' },
+    { label: t('settings.random_play_order_random'), value: 'random' },
+  ]
+  for (const option of orderOptions) {
+    const optionElement = document.createElement('option')
+    optionElement.value = option.value
+    optionElement.textContent = option.label
+    orderSelect.appendChild(optionElement)
+  }
+  activePlayOrder ??= getEffectiveCustomPlayOrder() ?? 'sequential'
+  orderSelect.value = activePlayOrder
 
   // 创建开关
-  const switchBtn = document.createElement('div')
+  const switchBtn = document.createElement('button')
+  switchBtn.type = 'button'
   switchBtn.className = 'switch-btn'
-
+  switchBtn.setAttribute('role', 'switch')
   switchBtn.style.cssText = `
     position: relative;
+    flex: none;
     width: 30px;
     height: 20px;
+    padding: 0;
     background: var(--bew-switch-bg);
+    border: 0;
     border-radius: 10px;
     transition: background-color 0.3s;
     cursor: pointer;
@@ -299,12 +835,38 @@ export function createRandomPlayUI(): HTMLElement | null {
   `
 
   switchBtn.appendChild(switchBlock)
-  randomPlayBtn.appendChild(txtEl)
+  randomPlayBtn.appendChild(orderSelect)
   randomPlayBtn.appendChild(switchBtn)
   randomPlayContainer.appendChild(randomPlayBtn)
 
+  const editButton = document.createElement('button')
+  editButton.type = 'button'
+  editButton.className = 'random-play-edit-btn'
+  editButton.title = t('settings.random_play_edit_playlist')
+  editButton.setAttribute('aria-label', t('settings.random_play_edit_playlist'))
+  editButton.style.cssText = `
+    width: 26px;
+    height: 26px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex: none;
+    padding: 0;
+    cursor: pointer;
+    color: var(--text3, #9499a0);
+    background: transparent;
+    border: 0;
+    border-radius: 6px;
+  `
+  editButton.appendChild(createEditIcon())
+  randomPlayContainer.appendChild(editButton)
+
   // 更新开关状态的函数
   function updateSwitchState(enabled: boolean) {
+    switchBtn.setAttribute('aria-checked', String(enabled))
+    switchBtn.title = enabled
+      ? t('settings.random_play_enabled')
+      : t('settings.random_play_disabled')
     if (enabled) {
       switchBtn.style.backgroundColor = 'var(--bew-theme-color)'
       // 30px宽度 - 2px左边距 - 2px右边距 - 16px滑块宽度 = 10px移动距离
@@ -316,132 +878,139 @@ export function createRandomPlayUI(): HTMLElement | null {
     }
   }
 
-  // 点击事件
-  randomPlayBtn.addEventListener('click', () => {
+  orderSelect.addEventListener('change', () => {
+    activePlayOrder = orderSelect.value as RandomPlayOrder
+    visitedEpisodes.clear()
+    // 播放器内的主动选择立即生效；自动启用规则只用于按视频类型配置的随机播放。
+    setRandomPlayEnabled(true)
+    userManuallySetRandomPlay = true
+    saveManualPlayState()
+    syncRandomPlayUI()
+  })
+
+  switchBtn.addEventListener('click', () => {
     const newEnabled = !isRandomPlayEnabled
     setRandomPlayEnabled(newEnabled)
     updateSwitchState(newEnabled)
     // 标记为用户手动设置
     userManuallySetRandomPlay = true
+    saveManualPlayState()
   })
+  editButton.addEventListener('click', () => toggleNativePlaylistEditing(editButton))
 
   // 初始状态 - 使用当前状态
   updateSwitchState(isRandomPlayEnabled)
 
-  // 插入到自动连播按钮旁边
-  const rightContainer = autoPlayContainer.parentElement
-  if (rightContainer) {
-    rightContainer.appendChild(randomPlayContainer)
-  }
+  mountCustomPlayControls(randomPlayContainer, controlsHost)
 
   return randomPlayContainer
+}
+
+function mountCustomPlayControls(controls: HTMLElement, host: HTMLElement): void {
+  const isHeader = host.matches('.video-pod__header')
+  controls.style.justifyContent = isHeader ? 'flex-end' : ''
+  controls.style.marginLeft = isHeader ? '0' : 'var(--bew-space-3, 12px)'
+  // 原生 header-bottom 已有底部留白，标题区不再叠加顶距。
+  controls.style.marginTop = '0'
+  if (controls.parentElement !== host)
+    host.appendChild(controls)
 }
 
 // 启用随机播放
 export function enableRandomPlay(): void {
   // 使用更可靠的方式监听视频结束
   const setupVideoListener = () => {
-    const video = document.querySelector('video')
+    if (!shouldCustomPlayHandleEnd())
+      return
+
+    const video = getVideoElement()
     if (!video) {
       // 如果找不到视频，稍后重试
       setTimeout(setupVideoListener, 1000)
       return
     }
 
-    // 移除之前的监听器
-    if (originalEndedListener) {
-      video.removeEventListener('ended', originalEndedListener)
-      originalEndedListener = null
-    }
-    if (originalPauseListener) {
-      video.removeEventListener('pause', originalPauseListener)
-      originalPauseListener = null
-    }
+    detachCustomPlayVideoListeners()
+    listenerVideo = video
 
     // 标记视频元素，防止重复添加监听器
     video.setAttribute('data-bewly-random-play-listener', 'true')
 
     // 用于防止重复触发
     let isProcessing = false
+    const looksLikeContent = !isPlayerShowingAdvertisement()
+      && (video.currentTime >= 2 || (video.duration > 0 && video.duration <= 3 && video.currentTime > 0))
+    let durationChangedAt = looksLikeContent ? 0 : Date.now()
+    let hasPlayedContent = looksLikeContent
 
-    // 创建新的随机播放监听器
-    const randomPlayListener = () => {
-      console.log('[BewlyCat Random Play] Video ended, random play listener triggered')
+    const markDurationChange = () => {
+      durationChangedAt = Date.now()
+      hasPlayedContent = false
+    }
 
-      // 防止重复触发（ended 和 pause 事件可能都会触发）
-      if (isProcessing) {
-        console.log('[BewlyCat Random Play] Already processing, skipping')
+    const markContentProgress = () => {
+      if (video.currentTime >= 2 || (video.duration > 0 && video.duration <= 3 && video.currentTime > 0))
+        hasPlayedContent = true
+    }
+
+    // 只在正片 ended 时切集。不要再用 pause 近似结束：广告屏蔽插件跳广告时
+    // 常会 seek 到结尾并暂停，和默认播放模式、自定义播放同时监听就会抢切集。
+    const randomPlayListener = (event: Event) => {
+      if (isProcessing || !shouldCustomPlayHandleEnd())
         return
-      }
 
-      // 关键：检查随机播放是否仍然启用
-      if (!isRandomPlayEnabled) {
-        console.log('[BewlyCat Random Play] Random play disabled, skipping')
+      if (!isGenuineCustomPlayEnd(video, event, { durationChangedAt, hasPlayedContent }))
         return
-      }
 
+      // 确认是正片结束后再拦截，避免挡住广告插件处理贴片广告。
+      event.stopImmediatePropagation()
       isProcessing = true
 
-      // 延迟执行，确保播放状态完全结束
-      setTimeout(() => {
-        // 重置处理标志
+      const episodes = getPlaybackEpisodeEntries().map(entry => entry.element)
+      if (episodes.length <= 1) {
         isProcessing = false
-        // 再次检查状态，防止在延迟期间被禁用
-        if (!isRandomPlayEnabled) {
-          console.log('[BewlyCat Random Play] Random play disabled during delay, skipping')
-          return
-        }
-
-        const episodes = getVideoEpisodes()
-        console.log('[BewlyCat Random Play] Found episodes:', episodes.length)
-
-        if (episodes.length <= 1) {
-          console.log('[BewlyCat Random Play] Not enough episodes')
-          return
-        }
-
-        const currentIndex = getCurrentEpisodeIndex(episodes)
-        console.log('[BewlyCat Random Play] Current episode index:', currentIndex)
-
-        const nextIndex = getRandomNextEpisode(episodes, currentIndex)
-        console.log('[BewlyCat Random Play] Next episode index:', nextIndex)
-
-        if (nextIndex !== currentIndex) {
-          jumpToEpisode(episodes, nextIndex)
-        }
-        else {
-          console.log('[BewlyCat Random Play] Next index same as current, not jumping')
-        }
-      }, 1500) // 增加到1.5秒延迟，确保播放完全结束
-    }
-
-    // 监听多个事件以确保兼容性
-    video.addEventListener('ended', randomPlayListener)
-    // 有些情况下pause事件可能更可靠
-    const randomPlayPauseListener = () => {
-      // 检查是否是播放结束（当前时间和总时间相近）
-      if (video.currentTime > 0 && video.duration > 0 && (video.duration - video.currentTime) < 1) {
-        randomPlayListener()
+        return
       }
+
+      const currentIndex = getCurrentEpisodeIndex(episodes)
+      const playOrder = getActivePlayOrder()
+      const nextIndex = getNextEpisodeIndex(episodes, currentIndex, playOrder)
+
+      if (nextIndex !== currentIndex)
+        jumpToEpisode(episodes, nextIndex)
+
+      setTimeout(() => {
+        isProcessing = false
+      }, 1500)
     }
-    video.addEventListener('pause', randomPlayPauseListener)
+
+    video.addEventListener('ended', randomPlayListener, true)
+    video.addEventListener('durationchange', markDurationChange)
+    video.addEventListener('timeupdate', markContentProgress)
 
     originalEndedListener = randomPlayListener
-    originalPauseListener = randomPlayPauseListener
+    originalDurationListener = markDurationChange
+    originalTimeUpdateListener = markContentProgress
   }
 
   // 立即尝试设置监听器
   setupVideoListener()
 
-  // 监听DOM变化，如果视频元素被替换，重新设置监听器
-  const videoObserver = new MutationObserver(() => {
-    const video = document.querySelector('video')
+  // 监听DOM变化，如果主播放器视频被替换，重新设置监听器
+  videoObserver?.disconnect()
+  videoObserver = new MutationObserver(() => {
+    // 弹幕、计时和控件更新都不需要重新查找仍在页面内的主视频。
+    if (listenerVideo?.isConnected)
+      return
+
+    const video = getVideoElement()
     if (video && !video.hasAttribute('data-bewly-random-play-listener')) {
       setupVideoListener()
     }
   })
 
-  videoObserver.observe(document.body, {
+  // 同 observeRandomPlayPageChanges：调用可能早于 <body> 解析，回落 documentElement。
+  videoObserver.observe(document.body ?? document.documentElement, {
     childList: true,
     subtree: true,
   })
@@ -449,20 +1018,9 @@ export function enableRandomPlay(): void {
 
 // 禁用随机播放
 export function disableRandomPlay(): void {
-  const video = document.querySelector('video')
-  if (!video || (!originalEndedListener && !originalPauseListener)) {
-    return
-  }
-
-  if (originalEndedListener)
-    video.removeEventListener('ended', originalEndedListener)
-  if (originalPauseListener)
-    video.removeEventListener('pause', originalPauseListener)
-  originalEndedListener = null
-  originalPauseListener = null
-
-  // 移除标记，以便下次可以重新添加
-  video.removeAttribute('data-bewly-random-play-listener')
+  detachCustomPlayVideoListeners()
+  videoObserver?.disconnect()
+  videoObserver = null
 
   // 清空访问记录
   visitedEpisodes.clear()
@@ -471,12 +1029,50 @@ export function disableRandomPlay(): void {
 // 设置随机播放状态
 export function setRandomPlayEnabled(enabled: boolean): void {
   isRandomPlayEnabled = enabled
-  if (enabled) {
+  const shouldHandle = shouldCustomPlayHandleEnd()
+  setCustomEndPlaybackHandlerActive(shouldHandle)
+  if (shouldHandle) {
+    disableNativeEndPlaybackBehavior()
     enableRandomPlay()
   }
   else {
     disableRandomPlay()
+    applyAutoPlayByVideoType()
   }
+}
+
+function shouldKeepManualPlayState(currentContextKey: string | null): boolean {
+  if (restoreManualPlayState())
+    return true
+  if (!userManuallySetRandomPlay)
+    return false
+  // 切集后选集 DOM 可能还没齐，缺 key 时不要当成换了合集。
+  if (!manualPlayContextKey || !currentContextKey)
+    return true
+  return manualPlayContextKey === currentContextKey
+}
+
+/** 切集后优先沿用用户刚调过的开关和顺序，只有确认换了合集才回到默认设置。 */
+export function applyPreservedOrDefaultCustomPlay(): void {
+  if (!isCustomPlayPage())
+    return
+
+  if (!settings.value.enableRandomPlay) {
+    setRandomPlayEnabled(false)
+    syncRandomPlayUI()
+    return
+  }
+
+  if (!shouldKeepManualPlayState(getCurrentPlayContextKey()))
+    userManuallySetRandomPlay = false
+
+  if (userManuallySetRandomPlay) {
+    setRandomPlayEnabled(isRandomPlayEnabled)
+    syncRandomPlayUI()
+    return
+  }
+
+  applyRandomPlayActivationSettings()
 }
 
 // 获取随机播放状态
@@ -484,23 +1080,120 @@ export function isRandomPlayActive(): boolean {
   return isRandomPlayEnabled
 }
 
+export function applyRandomPlayActivationSettings(): void {
+  if (!isCustomPlayPage())
+    return
+
+  userManuallySetRandomPlay = false
+  if (!settings.value.enableRandomPlay) {
+    activePlayOrder = 'sequential'
+    setRandomPlayEnabled(false)
+    syncRandomPlayUI()
+    return
+  }
+
+  const effectiveOrder = getEffectiveCustomPlayOrder()
+  if (effectiveOrder) {
+    activePlayOrder = effectiveOrder
+    if (effectiveOrder === 'random') {
+      if (settings.value.randomPlayMode === 'auto') {
+        const minVideos = Number(settings.value.minVideosForRandom) || 1
+        setRandomPlayEnabled(getVideoEpisodes().length >= minVideos)
+      }
+      else {
+        setRandomPlayEnabled(false)
+      }
+    }
+    else {
+      setRandomPlayEnabled(false)
+    }
+  }
+  else {
+    activePlayOrder = 'sequential'
+    setRandomPlayEnabled(false)
+  }
+  syncRandomPlayUI()
+}
+
 // 重置初始化状态
 export function resetRandomPlayInitialization(): void {
+  clearPageChangeTimers()
+  clearRandomPlayInitTimer()
+  stopNativePlaylistEditing()
   isRandomPlayInitialized = false
+  randomPlayInitGeneration++
   // 注意：这里不清除isRandomPlayEnabled，保持用户的选择
   // 也不清除userManuallySetRandomPlay标志，保持用户手动设置的状态
   visitedEpisodes.clear()
 }
 
+export function destroyRandomPlay(): void {
+  pageChangeObserver?.disconnect()
+  pageChangeObserver = null
+  clearPageChangeTimers()
+  clearRandomPlayInitTimer()
+  stopNativePlaylistEditing()
+  randomPlayInitGeneration++
+  setRandomPlayEnabled(false)
+  isRandomPlayInitialized = false
+  userManuallySetRandomPlay = false
+  visitedEpisodes.clear()
+  customEpisodeOrder = []
+  activePlayOrder = null
+  manualPlayContextKey = null
+  clearCustomEpisodeVisualOrder()
+  playlistEditorButton = null
+  playlistEditorStyle?.remove()
+  playlistEditorStyle = null
+  document.querySelector('.random-play')?.remove()
+}
+
 // 同步UI状态（当UI重新创建时调用）
+export function syncRandomPlayOrder(): void {
+  visitedEpisodes.clear()
+  activePlayOrder = getEffectiveCustomPlayOrder() ?? 'sequential'
+  const existingSelect = document.querySelector<HTMLSelectElement>('.random-play-order-select')
+  if (existingSelect)
+    existingSelect.value = activePlayOrder
+}
+
 export function syncRandomPlayUI(): void {
   const existingBtn = document.querySelector('.random-play-btn .switch-btn') as HTMLElement
   const existingBlock = document.querySelector('.random-play-btn .switch-block') as HTMLElement
+  const existingSelect = document.querySelector<HTMLSelectElement>('.random-play-order-select')
+  if (existingSelect)
+    existingSelect.value = getActivePlayOrder()
+
+  if (existingSelect) {
+    existingSelect.setAttribute('aria-label', getRandomPlayText())
+    existingSelect.title = getRandomPlayText()
+    const optionLabels: Record<RandomPlayOrder, string> = {
+      sequential: t('settings.random_play_order_sequential'),
+      reverse: t('settings.random_play_order_reverse'),
+      random: t('settings.random_play_order_random'),
+    }
+    for (const option of Array.from(existingSelect.options)) {
+      if (option.value === 'sequential' || option.value === 'reverse' || option.value === 'random')
+        option.textContent = optionLabels[option.value]
+    }
+  }
+
+  const editButton = document.querySelector<HTMLElement>('.random-play-edit-btn')
+  if (editButton) {
+    const label = t('settings.random_play_edit_playlist')
+    editButton.title = label
+    editButton.setAttribute('aria-label', label)
+  }
 
   if (existingBtn && existingBlock) {
+    existingBtn.setAttribute('aria-checked', String(isRandomPlayEnabled))
+    existingBtn.setAttribute(
+      'title',
+      t(isRandomPlayEnabled ? 'settings.random_play_enabled' : 'settings.random_play_disabled'),
+    )
     if (isRandomPlayEnabled) {
       existingBtn.style.backgroundColor = 'var(--bew-theme-color)'
-      existingBlock.style.transform = 'translateX(16px)'
+      existingBlock.style.transform = 'translateX(10px)'
     }
     else {
       existingBtn.style.backgroundColor = 'var(--bew-switch-bg)'
@@ -511,165 +1204,120 @@ export function syncRandomPlayUI(): void {
 
 // 在视频页面初始化随机播放
 export function initRandomPlayOnVideoPage(): void {
-  if (!isVideoPage() || isRandomPlayInitialized)
+  if (!isCustomPlayPage() || !settings.value.enableRandomPlay
+    || isRandomPlayInitialized || randomPlayInitTimer !== null) {
     return
+  }
+
+  const generation = randomPlayInitGeneration
+  let attempts = 0
 
   // 等待页面元素加载
   const checkAndInit = () => {
-    const autoPlayContainer = document.querySelector('.auto-play')
-    if (autoPlayContainer) {
+    randomPlayInitTimer = null
+    if (generation !== randomPlayInitGeneration || isRandomPlayInitialized
+      || !isCustomPlayPage() || !settings.value.enableRandomPlay) {
+      return
+    }
+
+    const controlsHost = findCustomPlayControlsHost()
+    if (controlsHost) {
       // 只要启用了随机播放功能就创建UI（基于扩展设置）
       if (settings.value.enableRandomPlay) {
         createRandomPlayUI()
-
-        // 如果用户手动设置过随机播放状态，直接应用该状态
-        if (userManuallySetRandomPlay) {
-          // 保持用户手动设置的状态，无需重新设置
-          syncRandomPlayUI()
-        }
-        else {
-          // 用户没有手动设置过，应用自动模式逻辑
-          // 检查视频数量是否足够，只影响自动启用
-          const episodes = getVideoEpisodes()
-          const minVideos = settings.value.minVideosForRandom || 5
-          const hasEnoughVideos = episodes.length >= minVideos
-
-          // 只有在视频数量足够且设置为自动模式时才自动启用，且当前未启用
-          if (hasEnoughVideos && settings.value.randomPlayMode === 'auto' && !isRandomPlayEnabled) {
-            setRandomPlayEnabled(true)
-          }
-
-          // 如果已经启用了，确保UI状态正确
-          if (isRandomPlayEnabled) {
-            syncRandomPlayUI()
-          }
-        }
-
+        applyPreservedOrDefaultCustomPlay()
         isRandomPlayInitialized = true
       }
     }
-    else {
+    else if (++attempts < RANDOM_PLAY_INIT_MAX_ATTEMPTS) {
       // 如果元素还没有加载，继续等待
-      setTimeout(checkAndInit, 100)
+      randomPlayInitTimer = setTimeout(checkAndInit, 100)
     }
   }
 
   // 延迟初始化，确保页面完全加载
-  setTimeout(checkAndInit, 500)
+  randomPlayInitTimer = setTimeout(checkAndInit, 500)
 }
 
-// 监听页面变化
-export function observeRandomPlayPageChanges(): void {
-  let lastUrl = window.location.href
-  let urlChangeTimeout: number | null = null
-
-  // 监听URL变化 - 使用防抖和延迟处理
-  const checkUrlChange = () => {
-    // 清除之前的定时器
-    if (urlChangeTimeout) {
-      clearTimeout(urlChangeTimeout)
-    }
-
-    // 延迟处理，让B站的路由系统先完成处理
-    urlChangeTimeout = window.setTimeout(() => {
-      const currentUrl = window.location.href
-      if (currentUrl !== lastUrl) {
-        // 检查是否只是hash变化或查询参数变化
-        const currentPath = currentUrl.split('?')[0].split('#')[0]
-        const lastPath = lastUrl.split('?')[0].split('#')[0]
-
-        // 只有路径真正变化时才重新初始化
-        if (currentPath !== lastPath) {
-          lastUrl = currentUrl
-          resetRandomPlayInitialization()
-
-          // 进一步延迟初始化，确保B站页面完全加载
-          setTimeout(() => {
-            if (isVideoPage()) {
-              initRandomPlayOnVideoPage()
-            }
-          }, 1500) // 增加到1.5秒
-        }
-        else {
-          // 只是参数或hash变化，更新URL记录但不重新初始化
-          lastUrl = currentUrl
-        }
-      }
-    }, 500) // 500ms防抖延迟
+function clearRandomPlayInitTimer(): void {
+  if (randomPlayInitTimer !== null) {
+    clearTimeout(randomPlayInitTimer)
+    randomPlayInitTimer = null
   }
+}
 
-  // 监听pushstate事件 - 使用捕获阶段避免冲突
-  window.addEventListener('pushstate', checkUrlChange, true)
+function clearPageChangeTimers() {
+  if (pageChangeDebounceTimer !== null) {
+    clearTimeout(pageChangeDebounceTimer)
+    pageChangeDebounceTimer = null
+  }
+  if (pageChangeRebuildTimer !== null) {
+    clearTimeout(pageChangeRebuildTimer)
+    pageChangeRebuildTimer = null
+  }
+}
 
-  // 监听popstate事件 - 使用捕获阶段避免冲突
-  window.addEventListener('popstate', checkUrlChange, true)
+// 只补播放列表 DOM；切集与默认播放器模式共用 content script 的判定链路。
+export function observeRandomPlayPageChanges(): void {
+  if (pageChangeObserver)
+    return
 
-  // 使用MutationObserver监听DOM变化
-  let domChangeTimeout: number | null = null
-  const observer = new MutationObserver((mutations) => {
-    if (!isVideoPage())
+  pageChangeObserver = new MutationObserver((mutations) => {
+    if (!isCustomPlayPage() || !settings.value.enableRandomPlay)
       return
 
-    // 使用防抖避免频繁触发
-    if (domChangeTimeout) {
-      clearTimeout(domChangeTimeout)
+    // 播放器内部的弹幕、计时、菜单和全屏控件变化不会替换页面播放列表。
+    if (mutations.every(mutation => mutation.target instanceof Element
+      && mutation.target.closest('.bpx-player-container, .bilibili-player'))) {
+      return
     }
 
-    domChangeTimeout = window.setTimeout(() => {
-      // 检查是否需要重新初始化
+    // 合并短时间内的 DOM 更新，但不能被持续更新的评论等内容无限推迟。
+    if (pageChangeDebounceTimer !== null)
+      return
+
+    pageChangeDebounceTimer = setTimeout(() => {
+      pageChangeDebounceTimer = null
+      if (!isCustomPlayPage() || !settings.value.enableRandomPlay)
+        return
+
+      if (customEpisodeOrder.length > 0)
+        applyCustomEpisodeVisualOrder()
+
       if (!isRandomPlayInitialized) {
-        initRandomPlayOnVideoPage()
+        // 首轮轮询可能早于合集加载完成；容器出现后继续初始化。
+        // 仅在目标存在时重试，避免无选集页面反复启动轮询。
+        if (findCustomPlayControlsHost())
+          initRandomPlayOnVideoPage()
         return
       }
 
       // 检查随机播放按钮是否还存在
       const existingBtn = document.querySelector('.random-play-btn')
-      const autoPlayContainer = document.querySelector('.auto-play')
+      const controlsHost = findCustomPlayControlsHost()
+      const existingRandomPlay = document.querySelector<HTMLElement>('.random-play')
+      const isMisplacedRandomPlay = !!existingRandomPlay && existingRandomPlay.parentElement !== controlsHost
 
-      // 如果按钮不存在但应该存在（有自动播放容器且启用了功能），则重新创建
-      if (!existingBtn && autoPlayContainer && settings.value.enableRandomPlay) {
-        // 检查是否是因为DOM重新渲染导致的
-        let shouldRecreate = false
-
-        for (const mutation of mutations) {
-          if (mutation.type === 'childList') {
-            // 只检查特定的DOM变化，减少误判
-            const removedNodes = Array.from(mutation.removedNodes)
-            const addedNodes = Array.from(mutation.addedNodes)
-
-            // 更精确的检查：只关注直接相关的DOM变化
-            const hasAutoPlayRemoved = removedNodes.some(node =>
-              node.nodeType === Node.ELEMENT_NODE
-              && ((node as Element).classList?.contains('auto-play')
-                || (node as Element).classList?.contains('random-play-btn')
-                || (node as Element).querySelector?.('.auto-play') !== null),
-            )
-
-            const hasAutoPlayAdded = addedNodes.some(node =>
-              node.nodeType === Node.ELEMENT_NODE
-              && (node as Element).classList?.contains('auto-play'),
-            )
-
-            if (hasAutoPlayRemoved || hasAutoPlayAdded) {
-              shouldRecreate = true
-              break
-            }
+      // 如果按钮不存在但应该存在（有控件挂载位置且启用了功能），则重新创建。
+      // 不要求 mutation 本身包含 auto-play；B 站常只替换其共同父容器。
+      if ((!existingBtn || isMisplacedRandomPlay) && controlsHost && pageChangeRebuildTimer === null) {
+        const generation = randomPlayInitGeneration
+        pageChangeRebuildTimer = setTimeout(() => {
+          pageChangeRebuildTimer = null
+          if (generation !== randomPlayInitGeneration || !isRandomPlayInitialized
+            || !isCustomPlayPage() || !settings.value.enableRandomPlay) {
+            return
           }
-        }
-
-        if (shouldRecreate) {
-          // 增加延迟，避免与Bilibili的DOM更新冲突
-          setTimeout(() => {
-            createRandomPlayUI()
-
-            // UI创建函数内部会自动同步状态，这里不需要额外处理
-          }, 500) // 增加延迟到500ms
-        }
+          createRandomPlayUI()
+          applyPreservedOrDefaultCustomPlay()
+        }, 500)
       }
-    }, 300) // 300ms防抖延迟
+    }, 300)
   })
 
-  observer.observe(document.body, {
+  // 内容脚本在 document_start 注入，设置水合触发的初始化可能早于 <body> 解析；
+  // 回落到 documentElement 并靠 subtree 覆盖随后插入的 body。
+  pageChangeObserver.observe(document.body ?? document.documentElement, {
     childList: true,
     subtree: true,
   })
@@ -677,7 +1325,7 @@ export function observeRandomPlayPageChanges(): void {
 
 // 初始化随机播放功能
 export function initRandomPlay(): void {
-  if (isVideoPage()) {
+  if (isCustomPlayPage()) {
     initRandomPlayOnVideoPage()
   }
 
@@ -685,6 +1333,6 @@ export function initRandomPlay(): void {
 }
 
 // 判断是否是视频页面
-export function isVideoPage(): boolean {
-  return /https?:\/\/(?:www\.)?bilibili\.com\/video\/.*/.test(window.location.href)
+export function isCustomPlayPage(): boolean {
+  return /https?:\/\/(?:www\.)?bilibili\.com\/(?:video|list)\/.*/.test(window.location.href)
 }

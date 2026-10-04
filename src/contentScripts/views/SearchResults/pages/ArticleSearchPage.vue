@@ -6,6 +6,7 @@ import ArticleCard from '~/components/ArticleCard/ArticleCard.vue'
 import Empty from '~/components/Empty.vue'
 import SmoothLoading from '~/components/SmoothLoading.vue'
 import { useBewlyApp } from '~/composables/useAppProvider'
+import { SEARCH_PAGE_SIZES } from '~/constants/searchApi'
 import { settings } from '~/logic'
 import api from '~/utils/api'
 
@@ -120,10 +121,10 @@ async function performSearch(loadMore: boolean): Promise<boolean> {
 
   const success = await search(
     keyword,
-    params => api.search.searchArticle(params),
+    (params, request) => api.search.searchArticle(params, request),
     {
       page: targetPage,
-      pagesize: 30,
+      page_size: SEARCH_PAGE_SIZES.article,
     },
   )
 
@@ -182,15 +183,17 @@ async function handlePageChange(page: number) {
 
   const success = await search(
     keyword,
-    params => api.search.searchArticle(params),
+    (params, request) => api.search.searchArticle(params, request),
     {
       page,
-      pagesize: 30,
+      page_size: SEARCH_PAGE_SIZES.article,
     },
   )
 
-  if (!success || !lastResponse.value?.data)
+  if (!success || !lastResponse.value?.data) {
+    isPageChanging.value = false
     return
+  }
 
   const rawData = lastResponse.value.data
   const incomingList = Array.isArray(rawData?.result) ? rawData.result : []

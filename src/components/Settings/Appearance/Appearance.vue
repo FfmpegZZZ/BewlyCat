@@ -8,8 +8,25 @@ import { FROSTED_GLASS_BLUR_MAX_PX, FROSTED_GLASS_BLUR_MIN_PX, localSettings, se
 import ChangeWallpaper from '../components/ChangeWallpaper.vue'
 import SettingsItem from '../components/SettingsItem.vue'
 import SettingsItemGroup from '../components/SettingsItemGroup.vue'
+import SettingsSectionHeading from '../components/SettingsSectionHeading.vue'
 
 const { t } = useI18n()
+
+const themeScheduleStart = ref(settings.value.themeScheduleStart)
+const themeScheduleEnd = ref(settings.value.themeScheduleEnd)
+
+watch(() => settings.value.themeScheduleStart, (value) => {
+  themeScheduleStart.value = value
+})
+
+watch(() => settings.value.themeScheduleEnd, (value) => {
+  themeScheduleEnd.value = value
+})
+
+function saveThemeSchedule() {
+  settings.value.themeScheduleStart = themeScheduleStart.value
+  settings.value.themeScheduleEnd = themeScheduleEnd.value
+}
 
 const themeColorOptions = computed<Array<string>>(() => {
   return [
@@ -55,6 +72,10 @@ const isCustomDarkModeBaseColor = computed<boolean>(() => {
   return !darkModeBaseColorOptions.value.includes(settings.value.darkModeBaseColor)
 })
 
+const bilibiliEvolvedThemeColor = computed(() => {
+  return getComputedStyle(document.documentElement).getPropertyValue('--theme-color').trim() || '#00a1d6'
+})
+
 const fontPreferenceOptions = computed(() => {
   return [
     {
@@ -75,16 +96,20 @@ const fontPreferenceOptions = computed(() => {
 const themeOptions = computed<Array<{ value: string, label: string }>>(() => {
   return [
     {
-      label: t('settings.theme_opt.light'),
-      value: 'light',
-    },
-    {
       label: t('settings.theme_opt.dark'),
       value: 'dark',
     },
     {
+      label: t('settings.theme_opt.light'),
+      value: 'light',
+    },
+    {
       label: t('settings.theme_opt.auto'),
       value: 'auto',
+    },
+    {
+      label: t('settings.theme_opt.scheduled'),
+      value: 'scheduled',
     },
   ]
 })
@@ -116,9 +141,86 @@ function changeWallpaper(url: string) {
 
 <template>
   <div>
+    <SettingsSectionHeading
+      :title="$t('settings.menu_appearance')"
+      :desc="$t('settings.category_appearance_desc')"
+      icon="i-mingcute:paint-brush-fill"
+    />
+
+    <SettingsItemGroup :title="$t('settings.group_visual_effects')">
+      <SettingsItem
+        :title="$t('settings.sidebar_cover_blur')"
+        :desc="$t('settings.sidebar_cover_blur_desc')"
+        right-width="auto"
+      >
+        <Radio v-model="settings.enableSidebarCoverBlur" />
+      </SettingsItem>
+      <SettingsItem
+        :title="$t('settings.enable_frosted_glass')"
+        :badge="$t('settings.badge_performance_impact')"
+        right-width="auto"
+      >
+        <template #desc>
+          <span class="bew-warning-text">{{ $t('common.performance_impact_warn') }}</span>
+        </template>
+
+        <Radio v-model="settings.enableFrostedGlass" />
+      </SettingsItem>
+      <SettingsItem
+        v-if="settings.enableFrostedGlass"
+        :title="$t('settings.frosted_glass_blur_intensity')"
+        right-width="auto"
+      >
+        <div class="slider-control">
+          <Slider
+            v-model="settings.frostedGlassBlurIntensity"
+            :min="FROSTED_GLASS_BLUR_MIN_PX"
+            :max="FROSTED_GLASS_BLUR_MAX_PX"
+            :label="`${settings.frostedGlassBlurIntensity}`"
+          />
+        </div>
+      </SettingsItem>
+      <SettingsItem
+        :title="$t('settings.enable_liquid_segment_indicator')"
+        :badge="$t('settings.badge_performance_impact')"
+        right-width="auto"
+      >
+        <template #desc>
+          <span>{{ $t('settings.enable_liquid_segment_indicator_desc') }}</span>
+          <span block class="bew-warning-text">{{ $t('common.performance_impact_warn') }}</span>
+        </template>
+        <Radio v-model="settings.enableLiquidSegmentIndicator" />
+      </SettingsItem>
+      <SettingsItem :title="$t('settings.disable_shadow')" right-width="auto">
+        <Radio v-model="settings.disableShadow" />
+      </SettingsItem>
+    </SettingsItemGroup>
+
+    <SettingsItemGroup :title="$t('settings.group_page_style')">
+      <SettingsItem
+        :title="$t('settings.adapt_to_other_page_styles')"
+        :desc="$t('settings.adapt_to_other_page_styles_desc')"
+        right-width="auto"
+      >
+        <Radio v-model="settings.adaptToOtherPageStyles" />
+      </SettingsItem>
+    </SettingsItemGroup>
+
     <SettingsItemGroup :title="$t('settings.group_color')">
       <SettingsItem :title="$t('settings.theme')" right-width="auto">
         <Select v-model="settings.theme" w="160px" :options="themeOptions" />
+      </SettingsItem>
+      <SettingsItem
+        v-if="settings.theme === 'scheduled'"
+        :title="$t('settings.theme_schedule')"
+        :desc="$t('settings.theme_schedule_desc')"
+        right-width="auto"
+      >
+        <div class="theme-schedule" flex="~ items-center gap-2">
+          <input v-model="themeScheduleStart" type="time" @blur="saveThemeSchedule">
+          <span>–</span>
+          <input v-model="themeScheduleEnd" type="time" @blur="saveThemeSchedule">
+        </div>
       </SettingsItem>
       <SettingsItem :title="$t('settings.video_page_dark_mode')" right-width="auto">
         <template #desc>
@@ -131,6 +233,7 @@ function changeWallpaper(url: string) {
         <div class="theme-color-options" flex="~ gap-2 wrap" justify-end>
           <div
             v-for="color in themeColorOptions" :key="color"
+            class="color-option"
             w-20px h-20px rounded-8 cursor-pointer transition
             duration-300 box-border
             :style="{
@@ -142,6 +245,7 @@ function changeWallpaper(url: string) {
             @click="changeThemeColor(color)"
           />
           <div
+            class="color-option"
             w-20px h-20px rounded-8 overflow-hidden
             cursor-pointer transition duration-300
             flex="~ items-center justify-center"
@@ -170,6 +274,7 @@ function changeWallpaper(url: string) {
         <div class="dark-mode-base-color-options" flex="~ gap-2 wrap" justify-end>
           <div
             v-for="color in darkModeBaseColorOptions" :key="color"
+            class="color-option"
             w-20px h-20px rounded-8 cursor-pointer transition
             duration-300 box-border
             :style="{
@@ -181,6 +286,7 @@ function changeWallpaper(url: string) {
             @click="changeDarkModeBaseColor(color)"
           />
           <div
+            class="color-option"
             w-20px h-20px rounded-8 overflow-hidden
             cursor-pointer transition duration-300
             flex="~ items-center justify-center"
@@ -208,36 +314,27 @@ function changeWallpaper(url: string) {
       <SettingsItem :title="$t('settings.gradient_theme_color_background')" right-width="auto">
         <Radio v-model="settings.useLinearGradientThemeColorBackground" />
       </SettingsItem>
+      <SettingsItem
+        :title="$t('settings.follow_bilibili_evolved_color')"
+        :desc="$t('settings.follow_bilibili_evolved_color_desc')"
+        right-width="auto"
+      >
+        <div
+          class="color-option"
+          w-20px h-20px rounded-8 cursor-pointer transition
+          duration-300 box-border
+          :style="{
+            background: bilibiliEvolvedThemeColor,
+            transform: bilibiliEvolvedThemeColor === settings.themeColor ? 'scale(1.3)' : 'scale(1)',
+            border: bilibiliEvolvedThemeColor === settings.themeColor ? '2px solid white' : '2px solid transparent',
+            boxShadow: bilibiliEvolvedThemeColor === settings.themeColor ? '0 0 0 1px var(--bew-border-color), var(--bew-shadow-1)' : 'none',
+          }"
+          @click="changeThemeColor(bilibiliEvolvedThemeColor)"
+        />
+      </SettingsItem>
     </SettingsItemGroup>
 
     <ChangeWallpaper type="global" />
-
-    <SettingsItemGroup :title="$t('settings.group_visual_effects')">
-      <SettingsItem :title="$t('settings.enable_frosted_glass')" right-width="auto">
-        <template #desc>
-          <span color="$bew-warning-color">{{ $t('common.performance_impact_warn') }}</span>
-        </template>
-
-        <Radio v-model="settings.enableFrostedGlass" />
-      </SettingsItem>
-      <SettingsItem
-        v-if="settings.enableFrostedGlass"
-        :title="$t('settings.frosted_glass_blur_intensity')"
-        right-width="auto"
-      >
-        <div class="slider-control">
-          <Slider
-            v-model="settings.frostedGlassBlurIntensity"
-            :min="FROSTED_GLASS_BLUR_MIN_PX"
-            :max="FROSTED_GLASS_BLUR_MAX_PX"
-            :label="`${settings.frostedGlassBlurIntensity}`"
-          />
-        </div>
-      </SettingsItem>
-      <SettingsItem :title="$t('settings.disable_shadow')" right-width="auto">
-        <Radio v-model="settings.disableShadow" />
-      </SettingsItem>
-    </SettingsItemGroup>
 
     <SettingsItemGroup :title="$t('settings.group_fonts')">
       <SettingsItem :title="$t('settings.customize_font')" right-width="auto">
@@ -260,7 +357,11 @@ function changeWallpaper(url: string) {
     </SettingsItemGroup>
 
     <SettingsItemGroup>
-      <SettingsItem :title="$t('settings.customize_css')" right-width="auto">
+      <SettingsItem
+        :title="$t('settings.customize_css')"
+        :badge="$t('settings.badge_advanced')"
+        right-width="auto"
+      >
         <Radio v-model="localSettings.customizeCSS" />
         <template #desc>
           <span text="$bew-error-color">
@@ -276,12 +377,39 @@ function changeWallpaper(url: string) {
 </template>
 
 <style lang="scss" scoped>
+.color-option {
+  transition:
+    border-color var(--bew-duration-normal) var(--bew-ease-standard),
+    box-shadow var(--bew-duration-normal) var(--bew-ease-standard),
+    filter var(--bew-duration-normal) var(--bew-ease-standard),
+    outline-color var(--bew-duration-normal) var(--bew-ease-standard),
+    transform var(--bew-duration-normal) var(--bew-ease-standard);
+}
+
+.color-option:hover {
+  filter: brightness(1.12);
+  outline: 1px solid var(--bew-border-color);
+  outline-offset: 2px;
+}
+
 .theme-color-options {
   width: 312px;
 }
 
 .dark-mode-base-color-options {
   width: 252px;
+}
+
+.theme-schedule input {
+  min-height: var(--bew-control-height);
+  padding: 0 var(--bew-space-3);
+  color: var(--bew-text-1);
+  background: var(--bew-fill-1);
+  border: 1px solid var(--bew-fill-3);
+  border-radius: var(--bew-interactive-radius);
+  font-size: var(--bew-font-size-body);
+  line-height: var(--bew-line-height-body);
+  color-scheme: inherit;
 }
 
 .slider-control {

@@ -1,23 +1,25 @@
 <script lang="ts" setup>
-import { computed, ref, watch, watchEffect } from 'vue'
+import { computed, ref, watchEffect } from 'vue'
 
 import { useBewlyApp } from '~/composables/useAppProvider'
+import { useUserRelationScope } from '~/composables/useUserRelationScope'
 import { useVideoCardSharedStyles } from '~/composables/useVideoCardSharedStyles'
 import { settings } from '~/logic'
 import type { VideoCardLayoutSetting } from '~/logic/storage'
-import { calcCurrentTime, calcTimeSince, numFormatter } from '~/utils/dataFormatter'
-import { wasVideoVisitedRecently } from '~/utils/videoVisitHistory'
+import { calcCurrentTime, numFormatter } from '~/utils/dataFormatter'
+import { recordVideoVisit } from '~/utils/videoVisitHistory'
 
 import VideoCardCover from './components/VideoCardCover.vue'
 import VideoCardInfo from './components/VideoCardInfo.vue'
 import { useVideoCardLogic } from './composables/useVideoCardLogic'
-import type { Video } from './types'
+import type { Video, VideoCardState } from './types'
 import VideoCardContextMenu from './VideoCardContextMenu/VideoCardContextMenu.vue'
 
 const props = withDefaults(defineProps<Props>(), {
   showWatcherLater: true,
   type: 'common',
   moreBtn: true,
+  disableContentVisibility: false,
 })
 
 interface Props {
@@ -29,18 +31,37 @@ interface Props {
   showPreview?: boolean
   moreBtn?: boolean
   hideAuthor?: boolean
+  hideWatchedBadge?: boolean
+  disableContentVisibility?: boolean
   isFollowingPage?: boolean
   customClickHandler?: (event: MouseEvent) => void
+  primaryClickObserver?: (event: MouseEvent) => void
   coverTopLeftAlwaysVisible?: boolean
+  coverTopRightAlwaysVisible?: boolean
+  persistentState?: VideoCardState
 }
 
 const layout = computed((): VideoCardLayoutSetting => {
   const layoutSetting = settings.value.videoCardLayout as VideoCardLayoutSetting | undefined
-  return layoutSetting === 'old' || layoutSetting === 'compact' ? layoutSetting : 'modern'
+  return layoutSetting === 'old' ? 'old' : 'modern'
+})
+
+const showMoreButton = computed(() =>
+  props.moreBtn
+  && settings.value.showVideoCardMoreButton
+  && settings.value.videoCardContextMenuConfig.some(item => item.visible),
+)
+
+// 包括接口自带关注状态的卡片，保留同屏关注操作的共享结果。
+useUserRelationScope(() => {
+  const author = Array.isArray(props.video?.author) ? props.video.author[0] : props.video?.author
+  return showMoreButton.value && author?.mid ? [author.mid] : []
 })
 
 // 数据现在在转换阶段已经完成 HTML 解码，直接使用 props
-const logic = useVideoCardLogic(props)
+const logic = useVideoCardLogic(props, props.persistentState)
+// Keep menus, keyboard focus (handled by the grid), and fullscreen previews alive.
+defineExpose({ canRecycle: computed(() => !logic.showVideoOptions.value && !logic.isPreviewFullscreen.value && !logic.isHover.value) })
 const { mainAppRef } = useBewlyApp()
 
 // 使用共享样式（避免每个卡片重复计算）
@@ -70,7 +91,6 @@ const coverStatValues = computed(() => {
       danmaku: '',
       like: '',
       duration: '',
-      published: '',
     }
   }
 
@@ -83,44 +103,28 @@ const coverStatValues = computed(() => {
     duration: props.video.duration
       ? calcCurrentTime(props.video.duration)
       : props.video.durationStr ?? '',
-    published: props.video.publishedTimestamp
-      ? calcTimeSince(props.video.publishedTimestamp * 1000)
-      : props.video.capsuleText?.trim() ?? '',
   }
 })
 
 const coverStatsVisibility = computed(() => {
-  const { view, danmaku, like, duration, published } = coverStatValues.value
-
-  if (layout.value === 'compact') {
-    return {
-      view: false,
-      danmaku: false,
-      like: false,
-      duration: Boolean(duration),
-      published: Boolean(published),
-    }
-  }
+  const { view, danmaku, like, duration } = coverStatValues.value
 
   // 无用户信息模式下，只显示播放量和时长
   if (props.hideAuthor) {
     return {
-      view: Boolean(view),
+      view: settings.value.showVideoCardViewCount && Boolean(view),
       danmaku: false,
       like: false,
-      duration: Boolean(duration),
-      published: false,
+      duration: settings.value.showVideoCardDuration && Boolean(duration),
     }
   }
 
-  // 所有统计项默认显示，由 CSS Container Query 控制响应式隐藏
-  // 这避免了 JS 监听宽度变化带来的性能问题
+  // 所有已启用的统计项都交给封面统计栏布局；空间不足时从右侧末项开始隐藏。
   return {
-    view: Boolean(view),
-    danmaku: Boolean(danmaku),
-    like: Boolean(like),
-    duration: Boolean(duration),
-    published: false,
+    view: settings.value.showVideoCardViewCount && Boolean(view),
+    danmaku: settings.value.showVideoCardDanmakuCount && Boolean(danmaku),
+    like: settings.value.showVideoCardLikeCount && Boolean(like),
+    duration: settings.value.showVideoCardDuration && Boolean(duration),
   }
 })
 
@@ -136,7 +140,6 @@ const hasCoverStats = computed(() => {
     || (visibility.danmaku && values.danmaku)
     || (visibility.like && values.like)
     || (visibility.duration && values.duration)
-    || (visibility.published && values.published)
   )
 })
 
@@ -152,12 +155,31 @@ const previewEnabled = computed(() =>
   Boolean(props.showPreview && settings.value.enableVideoPreview),
 )
 
+const shouldDisableLinkDragging = computed(() =>
+  previewEnabled.value
+  && settings.value.enableVideoPreviewSwipeSeek,
+)
+
 const hoverPreviewOnCoverOnly = computed(() =>
   previewEnabled.value && settings.value.onlyCoverVideoPreview,
 )
 
+function handleLinkClick(event: MouseEvent) {
+  if (props.video)
+    recordVideoVisit(props.video)
+
+  try {
+    props.primaryClickObserver?.(event)
+  }
+  catch (error) {
+    console.error('Video card click observer failed:', error)
+  }
+  const clickHandler = props.customClickHandler || logic.handleClick
+  clickHandler(event)
+}
+
 const linkEvents = computed(() => ({
-  click: props.customClickHandler || logic.handleClick,
+  click: handleLinkClick,
   ...(hoverPreviewOnCoverOnly.value
     ? {}
     : {
@@ -175,32 +197,20 @@ const coverEvents = computed(() =>
     : {},
 )
 
-const primaryTags = computed(() => {
+const videoTags = computed(() => {
   const video = props.video
   if (!video)
     return []
   const { tag } = video
-  if (!tag)
-    return []
-  if (Array.isArray(tag))
-    return tag.filter(Boolean)
-  return [tag]
+  const displayTags = !tag
+    ? []
+    : Array.isArray(tag)
+      ? tag.filter(Boolean)
+      : [tag]
+  return [video.category, ...displayTags, ...(video.searchableTags ?? [])].filter(Boolean) as string[]
 })
 
-const wasVisitedRecently = computed(() =>
-  Boolean(props.isFollowingPage && props.video && wasVideoVisitedRecently(props.video)),
-)
-
-// 使用 CSS 变量定义，让浏览器通过 CSS 容器查询自动响应
-const coverStatsStyle = computed(() => {
-  if (layout.value === 'old')
-    return {}
-
-  // 所有响应式样式都通过 CSS 容器查询处理，这里只设置基础值
-  return {}
-})
-
-// Highlight tags calculation - 使用查找表优化性能
+// 插件计算标签 - 使用查找表优化性能
 const LIKE_RATIO_THRESHOLDS = [
   { view: 1_000_000, ratio: 0.01 },
   { view: 200_000, ratio: 0.025 },
@@ -215,11 +225,11 @@ const DANMAKU_RATIO_THRESHOLDS = [
   { view: 0, ratio: 0.005 },
 ] as const
 
-const highlightTags = computed(() => {
+const pluginComputedTags = computed(() => {
   if (!props.video)
     return [] as string[]
 
-  // 如果设置为不显示推荐标签，则不显示插件计算的标签
+  // 如果关闭插件计算标签，则不再生成这些标签。
   if (!settings.value.showVideoCardRecommendTag)
     return [] as string[]
 
@@ -257,23 +267,13 @@ const highlightTags = computed(() => {
 
   // 百万播放标签 - 只有在外部tag没有播放字眼时显示，且优先级最后
   if (viewCount >= 1_000_000) {
-    const hasPlayKeyword = primaryTags.value.some(tag => /播放|观看|views?|play/i.test(tag))
+    const hasPlayKeyword = videoTags.value.some(tag => /播放|观看|views?|play/i.test(tag))
     if (!hasPlayKeyword)
       tags.push('百万播放')
   }
 
-  // 如果传入了2个或更多Tag，则不显示推荐tag
-  if (primaryTags.value.length >= 2) {
-    return []
-  }
-  else if (primaryTags.value.length > 0) {
-    // tags只返回一个
-    return tags.slice(0, 1)
-  }
-  else {
-    // 最多返回2个，避免越界
-    return tags.slice(0, 2)
-  }
+  // 接口标签的显示优先级由信息组件统一处理，这里只提供候选项。
+  return tags.slice(0, 2)
 })
 
 function getDurationHighlight(video: Video) {
@@ -318,28 +318,12 @@ const coverImageUrl = computed(() =>
 
 const infoComponentRef = ref()
 
-// 图片加载状态：用于等待图片加载完成后才显示真实内容
-const imageLoaded = ref(false)
-
 // Cover 骨架屏状态：只依赖数据骨架屏，让图片能立即开始加载
 const coverSkeleton = computed(() => props.skeleton)
 
 // Info 骨架屏状态：只依赖数据骨架屏，不等待图片加载
 // 这避免了滚动时图片加载触发的大量 DOM 重构
 const infoSkeleton = computed(() => props.skeleton)
-
-// 监听skeleton prop变化，重置imageLoaded状态
-watch(() => props.skeleton, (newVal) => {
-  if (newVal) {
-    // 变成骨架屏时，重置图片加载状态
-    imageLoaded.value = false
-  }
-})
-
-// 处理图片加载完成
-function handleImageLoaded() {
-  imageLoaded.value = true
-}
 
 // Expose moreBtnRef from child component
 watchEffect(() => {
@@ -355,17 +339,24 @@ provide('getVideoType', () => props.type!)
   <div
     :ref="(el) => logic.cardRootRef.value = el as HTMLElement"
     class="video-card-container"
-    duration-300 ease-in-out
-    rounded="$bew-radius"
+    :data-layout-edit-target="skeleton ? undefined : 'video-card'"
+    :data-layout-settings-menu="skeleton ? undefined : 'BewlyComponents'"
+    :data-layout-settings-page="skeleton ? undefined : 'video-card'"
+    :data-layout-settings-title-key="skeleton ? undefined : 'settings.group_video_card_display'"
+    rounded="$bew-card-radius"
     :class="[
       layout !== 'old' ? 'mb-3' : 'mb-4',
       skeleton ? 'video-card-container--skeleton' : 'video-card-container--interactive',
+      disableContentVisibility ? 'video-card-container--layout-stable' : '',
     ]"
+    :style="disableContentVisibility
+      ? { contentVisibility: 'visible', containIntrinsicSize: 'none' }
+      : undefined"
   >
     <div
       class="video-card group"
       w="full"
-      rounded="$bew-radius"
+      rounded="$bew-card-radius"
     >
       <component
         :is="coverSkeleton ? 'div' : 'ALink'"
@@ -375,6 +366,7 @@ provide('getVideoType', () => props.type!)
           type: 'videoCard',
           customClickEvent: Boolean(props.customClickHandler) || settings.videoCardLinkOpenMode === 'drawer' || settings.videoCardLinkOpenMode === 'background',
           customClickEventIncludesModifiers: Boolean(props.customClickHandler),
+          disableDragging: shouldDisableLinkDragging,
         }"
         v-on="coverSkeleton ? {} : linkEvents"
       >
@@ -391,37 +383,30 @@ provide('getVideoType', () => props.type!)
             :horizontal="horizontal"
             :removed="logic.removed.value"
             :is-hover="logic.isHover.value"
-            :preview-enabled="previewEnabled"
             :should-hide-overlay-elements="Boolean(logic.shouldHideOverlayElements.value)"
             :preview-video-url="logic.previewVideoUrl.value || ''"
             :video-element="logic.videoElement.value || null"
             :is-in-watch-later="logic.isInWatchLater.value"
-            :show-watcher-later="showWatcherLater"
+            :show-watcher-later="showWatcherLater && settings.showVideoCardWatchLater"
             :cover-top-left-always-visible="coverTopLeftAlwaysVisible"
+            :cover-top-right-always-visible="coverTopRightAlwaysVisible"
             :cover-image-url="coverImageUrl"
             :cover-stat-values="coverStatValues"
             :cover-stats-visibility="coverStatsVisibility"
             :has-cover-stats="Boolean(hasCoverStats)"
             :should-hide-cover-stats="Boolean(shouldHideCoverStats)"
-            :cover-stats-style="coverStatsStyle as Record<string, string>"
+            :show-local-watch-progress="!hideWatchedBadge && settings.showVideoWatchedBadge && !props.video?.roomid"
             @toggle-watch-later="logic.toggleWatchLater"
             @undo="logic.handleUndo"
-            @image-loaded="handleImageLoaded"
             @preview-fullscreen-change="logic.handlePreviewFullscreenChange"
           >
             <template #coverTopLeft>
               <slot name="coverTopLeft" />
             </template>
+            <template #coverTopRight>
+              <slot name="coverTopRight" />
+            </template>
           </VideoCardCover>
-
-          <div
-            v-if="wasVisitedRecently"
-            class="video-card-visited-marker"
-            :title="$t('video_card.visited_recently')"
-            :aria-label="$t('video_card.visited_recently')"
-          >
-            {{ $t('video_card.watched') }}
-          </div>
         </div>
 
         <!-- Other Information -->
@@ -434,22 +419,29 @@ provide('getVideoType', () => props.type!)
           :layout="layout"
           :horizontal="horizontal || false"
           :video-url="logic.videoUrl.value"
-          :more-btn="moreBtn"
+          :more-btn="showMoreButton"
           :show-video-options="logic.showVideoOptions.value"
           :title-font-size-class="titleFontSizeClass"
           :title-style="titleStyle"
           :author-font-size-class="authorFontSizeClass"
           :meta-font-size-class="metaFontSizeClass"
-          :highlight-tags="highlightTags"
+          :plugin-computed-tags="pluginComputedTags"
           :hide-author="hideAuthor"
+          :hide-watched-badge="hideWatchedBadge"
           @more-btn-click="logic.handleMoreBtnClick"
+        />
+        <!-- Keep the configured cover/info ratio after horizontal cards are removed. -->
+        <div
+          v-else-if="horizontal"
+          class="horizontal-card-info"
+          aria-hidden="true"
         />
       </component>
     </div>
 
-    <!-- context menu -->
+    <!-- More menu -->
     <Teleport
-      v-if="logic.showVideoOptions.value && props.video"
+      v-if="logic.showVideoOptions.value && props.video && showMoreButton"
       :to="mainAppRef"
     >
       <VideoCardContextMenu
@@ -459,6 +451,7 @@ provide('getVideoType', () => props.type!)
         }"
         :context-menu-styles="logic.videoOptionsFloatingStyles.value"
         :is-following-page="props.isFollowingPage"
+        :trigger-element="logic.moreBtnRef.value"
         @close="logic.showVideoOptions.value = false"
         @removed="logic.handleRemoved"
       />
@@ -495,27 +488,15 @@ provide('getVideoType', () => props.type!)
   min-height: fit-content;
 }
 
-/* 骨架屏状态：禁用交互 */
+/* 骨架屏状态：禁用交互；各内容块自身已经提供骨架反馈。 */
 .video-card-container--skeleton {
   pointer-events: none;
-  animation: video-card-skeleton-pulse 1.4s ease-in-out infinite;
 }
 
-@keyframes video-card-skeleton-pulse {
-  0%,
-  100% {
-    opacity: 1;
-  }
-
-  50% {
-    opacity: 0.55;
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .video-card-container--skeleton {
-    animation: none;
-  }
+/* 普通分页 grid 不使用 offscreen 估算，避免滚动进入视口时发生高度回流。 */
+.video-card-container--layout-stable {
+  content-visibility: visible;
+  contain-intrinsic-size: none;
 }
 
 /* hover/active 效果全部在最外层容器，background-color + box-shadow 同一元素同步动画，无时序差 */
@@ -543,13 +524,13 @@ provide('getVideoType', () => props.type!)
 }
 
 .horizontal-card-cover {
-  --uno: "w-full max-w-400px aspect-video";
-  flex: 1 1 0;
+  --uno: "w-full aspect-video";
+  flex: var(--video-card-cover-flex, 50) 1 0;
   min-width: 0;
 }
 
 .horizontal-card-info {
-  flex: 1 1 0;
+  flex: var(--video-card-info-flex, 50) 1 0;
   min-width: 0;
 }
 
@@ -557,26 +538,9 @@ provide('getVideoType', () => props.type!)
   --uno: "w-full";
 }
 
-.video-card-visited-marker {
-  position: absolute;
-  top: 0.5rem;
-  left: 0.5rem;
-  z-index: 3;
-  color: rgb(255 255 255 / 90%);
-  font-size: 0.6875rem;
-  font-weight: 600;
-  line-height: 1;
-  letter-spacing: 0.04em;
-  opacity: 0.48;
-  pointer-events: none;
-  text-shadow:
-    0 1px 2px rgb(0 0 0 / 85%),
-    0 0 4px rgb(0 0 0 / 55%);
-}
-
 .bew-title-auto {
   /* 使用固定的响应式字体大小，不使用容器查询单位 */
-  font-size: clamp(12px, 2.5vw, 18px);
+  font-size: clamp(var(--bew-font-size-control), 2.5vw, var(--bew-font-size-heading));
   line-height: clamp(1.15, 1.35, 1.5);
 }
 
@@ -589,7 +553,8 @@ provide('getVideoType', () => props.type!)
 
 /* 使用固定样式变量 */
 :deep(.video-card-stats) {
-  --video-card-stats-font-size: 0.75rem;
+  --video-card-stats-font-size: var(--bew-font-size-control);
+  --video-card-stats-line-height: var(--bew-line-height-control);
   --video-card-stats-overlay-scale: 1.4;
   --video-card-stats-icon-size: 0.825rem;
 }

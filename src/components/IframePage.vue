@@ -3,15 +3,22 @@ import { useBewlyApp } from '~/composables/useAppProvider'
 import { useDark } from '~/composables/useDark'
 import { IFRAME_DARK_MODE_CHANGE, IFRAME_TOP_BAR_CHANGE } from '~/constants/globalEvents'
 import { settings } from '~/logic'
+import { shouldShowOriginalBilibiliTopBar } from '~/utils/bilibiliTopBar'
+import { releaseIframeMedia } from '~/utils/iframe'
 
 const props = defineProps<{
   url: string
 }>()
-const { reachTop } = useBewlyApp()
+const emit = defineEmits<{
+  scroll: [scrollTop: number]
+}>()
+const { reachTop, scrollTop } = useBewlyApp()
 const { isDark } = useDark()
 const headerShow = ref(false)
 const iframeRef = ref<HTMLIFrameElement | null>(null)
-const currentUrl = ref<string>(props.url)
+let isDisposed = false
+let showLoadingTimeout: ReturnType<typeof setTimeout> | undefined
+let initialThemeTimeout: ReturnType<typeof setTimeout> | undefined
 
 const showLoading = ref<boolean>(false)
 const iframeScrollCleanupFns = ref<Array<() => void>>([])
@@ -34,8 +41,11 @@ function updateReachTopFromIframe() {
   try {
     const doc = iframeWindow.document
     const scrollElement = doc?.scrollingElement ?? doc?.documentElement ?? doc?.body
-    const scrollTop = scrollElement?.scrollTop ?? iframeWindow.scrollY ?? 0
-    reachTop.value = scrollTop <= 0
+    const iframeScrollTop = scrollElement?.scrollTop ?? iframeWindow.scrollY ?? 0
+    scrollTop.value = iframeScrollTop
+    reachTop.value = iframeScrollTop <= 0
+    // 原版页面的滚动发生在 iframe 内，需要交给外层顶栏处理自动隐藏。
+    emit('scroll', iframeScrollTop)
   }
   catch (error) {
     if (!iframeScrollSyncFailed.value) {
@@ -86,6 +96,36 @@ function canAccessIframeDocument(iframeWindow: Window): boolean {
   }
 }
 
+function syncIframeTopBarVisibility() {
+  const iframeWindow = iframeRef.value?.contentWindow
+  if (!iframeWindow)
+    return
+
+  const useOriginalBilibiliTopBar = settings.value.useOriginalBilibiliTopBar
+  const enableTopBar = settings.value.enableTopBar
+  const showOriginal = shouldShowOriginalBilibiliTopBar(enableTopBar, useOriginalBilibiliTopBar)
+
+  // 同源时直接同步类名，避免 iframe 消息监听器尚未就绪时短暂显示原版顶栏
+  try {
+    iframeWindow.document.documentElement.classList.toggle('remove-top-bar', !showOriginal)
+    iframeWindow.document.documentElement.classList.toggle('remove-custom-navbar', enableTopBar)
+  }
+  catch {
+    // 跨域页面继续使用 postMessage 同步
+  }
+
+  try {
+    iframeWindow.postMessage({
+      type: IFRAME_TOP_BAR_CHANGE,
+      useOriginalBilibiliTopBar,
+      enableTopBar,
+    }, '*')
+  }
+  catch (error) {
+    console.warn('Failed to send top bar change message to iframe:', error)
+  }
+}
+
 watch(() => isDark.value, (newValue) => {
   if (iframeRef.value?.contentWindow) {
     try {
@@ -100,19 +140,13 @@ watch(() => isDark.value, (newValue) => {
   }
 })
 
-watch(() => settings.value.useOriginalBilibiliTopBar, (newValue) => {
-  if (iframeRef.value?.contentWindow) {
-    try {
-      iframeRef.value.contentWindow.postMessage({
-        type: IFRAME_TOP_BAR_CHANGE,
-        useOriginalBilibiliTopBar: newValue,
-      }, '*')
-    }
-    catch (error) {
-      console.warn('Failed to send top bar change message to iframe:', error)
-    }
-  }
-}, { immediate: true })
+watch(
+  [() => settings.value.useOriginalBilibiliTopBar, () => settings.value.enableTopBar],
+  () => {
+    syncIframeTopBarVisibility()
+  },
+  { immediate: true },
+)
 
 // 监听深色模式基准颜色变化
 watch(() => settings.value.darkModeBaseColor, (newColor) => {
@@ -130,34 +164,47 @@ watch(() => settings.value.darkModeBaseColor, (newColor) => {
   }
 })
 
-// watch(() => props.url, () => {
-//   showIframe.value = false
-// })
+function clearIframeTimers() {
+  clearTimeout(showLoadingTimeout)
+  clearTimeout(initialThemeTimeout)
+  showLoadingTimeout = undefined
+  initialThemeTimeout = undefined
+}
 
-// Only show loading animation after 1.5 seconds to prevent annoying flash when content loads quickly
-const showLoadingTimeout = ref()
+function startNavigation() {
+  clearIframeTimers()
+  cleanupIframeScrollSync()
+  showLoading.value = false
+  // Only show loading after 1.5 seconds to avoid flashing on fast navigation.
+  showLoadingTimeout = setTimeout(() => {
+    showLoadingTimeout = undefined
+    showLoading.value = true
+  }, 1500)
+}
 
 // 处理iframe加载完成事件
 function handleIframeLoad() {
+  if (isDisposed)
+    return
+
   // 清除loading状态
-  clearTimeout(showLoadingTimeout.value)
+  clearIframeTimers()
   showLoading.value = false
 
   setupIframeScrollSync()
+  syncIframeTopBarVisibility()
 
   // 当iframe加载完成后，发送当前的黑暗模式状态（仅在跨域时需要）
   if (iframeRef.value?.contentWindow) {
-    setTimeout(() => {
+    initialThemeTimeout = setTimeout(() => {
+      initialThemeTimeout = undefined
       try {
         iframeRef.value?.contentWindow?.postMessage({
           type: IFRAME_DARK_MODE_CHANGE,
           isDark: isDark.value,
           darkModeBaseColor: settings.value.darkModeBaseColor,
         }, '*')
-        iframeRef.value?.contentWindow?.postMessage({
-          type: IFRAME_TOP_BAR_CHANGE,
-          useOriginalBilibiliTopBar: settings.value.useOriginalBilibiliTopBar,
-        }, '*')
+        syncIframeTopBarVisibility()
       }
       catch (error) {
         console.warn('Failed to send initial dark mode state to iframe:', error)
@@ -166,52 +213,26 @@ function handleIframeLoad() {
   }
 }
 
-watch(() => props.url, () => {
-  // URL变化时启动loading逻辑，但保持iframe可见以避免样式计算错误
-  cleanupIframeScrollSync()
-  showLoadingTimeout.value = setTimeout(() => {
-    showLoading.value = true
-  }, 1500)
-})
+watch(() => props.url, startNavigation)
 
 onMounted(() => {
-  // 第一次加载时启动loading逻辑
-  showLoadingTimeout.value = setTimeout(() => {
-    showLoading.value = true
-  }, 1500)
+  startNavigation()
 
   nextTick(() => {
-    iframeRef.value?.focus()
+    if (!isDisposed)
+      iframeRef.value?.focus()
   })
 })
 
 onBeforeUnmount(() => {
-  releaseIframeResources()
-})
-
-async function releaseIframeResources() {
+  isDisposed = true
+  clearIframeTimers()
   cleanupIframeScrollSync()
+  scrollTop.value = 0
   reachTop.value = true
-
-  // Clear iframe content
-  currentUrl.value = 'about:blank'
-  /**
-   * eg: When use 'iframeRef.value?.contentWindow?.document' of t.bilibili.com iframe on bilibili.com, there may be cross domain issues
-   * set the src to 'about:blank' to avoid this issue, it also can release the memory
-   */
-  if (iframeRef.value) {
-    iframeRef.value.src = 'about:blank'
-  }
-  await nextTick()
-  iframeRef.value?.contentWindow?.close()
-
-  // Remove iframe from the DOM
-  iframeRef.value?.parentNode?.removeChild(iframeRef.value)
-  await nextTick()
-
-  // Nullify the reference
-  iframeRef.value = null
-}
+  // Do not await nextTick: Vue clears template refs during unmount.
+  releaseIframeMedia(iframeRef.value)
+})
 
 function handleBackToTop() {
   if (iframeRef.value) {
@@ -221,6 +242,7 @@ function handleBackToTop() {
 
 function handleRefresh() {
   if (iframeRef.value) {
+    startNavigation()
     iframeRef.value.contentWindow?.location.reload()
   }
 }

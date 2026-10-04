@@ -1,18 +1,23 @@
 <script setup lang="ts">
-import { onKeyStroke, useMouseInElement, useMutationObserver } from '@vueuse/core'
+import { onKeyStroke, useMouseInElement } from '@vueuse/core'
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 
 import { useBewlyApp } from '~/composables/useAppProvider'
 import { useDark } from '~/composables/useDark'
-import { OVERLAY_SCROLL_BAR_SCROLL, TOP_BAR_SCROLL_VISIBILITY_CHANGE, TOP_BAR_VISIBILITY_CHANGE } from '~/constants/globalEvents'
+import { useLayoutEditMode } from '~/composables/useLayoutEditMode'
+import { BEWLY_IFRAME_DRAWER_HOST_CLASS, OVERLAY_SCROLL_BAR_SCROLL, TOP_BAR_SCROLL_VISIBILITY_CHANGE, TOP_BAR_VISIBILITY_CHANGE } from '~/constants/globalEvents'
 import { VideoPageTopBarConfig } from '~/enums/appEnums'
 import { settings } from '~/logic'
 import { useTopBarStore } from '~/stores/topBarStore'
+import { isBewlyWidescreenActive } from '~/utils/bewlyWidescreen'
+import { findLeafActiveElement } from '~/utils/element'
 import { isHomePage, isUserSpacePage, isVideoOrBangumiPage } from '~/utils/main'
 import emitter from '~/utils/mitt'
+import { isComponentVisible } from '~/utils/topBarBadge'
 
 import NotificationsDrawer from './components/NotificationsDrawer.vue'
 import TopBarHeader from './components/TopBarHeader.vue'
+import TopBarModeSwitcher from './components/TopBarModeSwitcher.vue'
 import { useTopBarInteraction } from './composables/useTopBarInteraction'
 
 const { reachTop } = useBewlyApp()
@@ -21,13 +26,17 @@ const topBarStore = useTopBarStore()
 const { forceWhiteIcon } = useTopBarInteraction()
 
 const conflictingHeaderSelectors = ['.fixed-author-header', '.fixed-top-header']
+const conflictingHeaderSelector = conflictingHeaderSelectors.join(',')
+const spaceNavbarSelector = '.nav-bar.space-navbar'
 
 const { isDark } = useDark()
+const { isLayoutEditing } = useLayoutEditMode()
 
 // 顶栏显示控制
 const hideTopBar = ref<boolean>(false)
 const desiredTopBarVisible = ref(true)
 const forceHideTopBar = ref(false)
+const bewlyWidescreenActive = ref(false)
 const headerTarget = ref(null)
 const topAreaTarget = ref(null)
 const { isOutside: isOutsideTopBar } = useMouseInElement(headerTarget)
@@ -41,43 +50,90 @@ function checkUrlChange() {
   if (currentUrl.value !== window.location.href) {
     currentUrl.value = window.location.href
     setupScrollListeners()
-    updateConflictingHeaderVisibility()
+    setupConflictingHeaderObserver()
   }
 }
 
 // 延迟隐藏计时器
 let hideTimer: number | null = null
-let urlCheckTimer: number | null = null
+let urlChangeCheckQueued = false
+let topBarUnmounted = false
+// 后台恢复的标签页推迟到首次可见时再初始化，避免多个标签页同时挤占后台请求。
+let initDataDeferred = false
+
+async function initTopBarData() {
+  try {
+    await topBarStore.initData()
+  }
+  catch (error) {
+    console.error('初始化顶栏数据失败:', error)
+  }
+}
+
+function scheduleUrlChangeCheck() {
+  if (urlChangeCheckQueued || topBarUnmounted)
+    return
+
+  urlChangeCheckQueued = true
+  queueMicrotask(() => {
+    urlChangeCheckQueued = false
+    checkUrlChange()
+  })
+}
 
 // 检测是否有弹窗激活
 const hasActivePopup = computed(() => {
   return Object.values(topBarStore.popupVisible).some(visible => visible)
 })
 
+const ORIGINAL_VIDEO_TOP_BAR_CONTROLLED_CLASS = 'bewly-original-video-top-bar-controlled'
+const ORIGINAL_VIDEO_TOP_BAR_HIDDEN_CLASS = 'bewly-original-video-top-bar-hidden'
+
+function isIframeDrawerHost() {
+  return document.documentElement.classList.contains(BEWLY_IFRAME_DRAWER_HOST_CLASS)
+}
+
 function applyTopBarVisibility() {
-  const shouldShow = desiredTopBarVisible.value
+  const shouldShow = !bewlyWidescreenActive.value
+    && desiredTopBarVisible.value
     && (
       !forceHideTopBar.value
       || hasActivePopup.value
-      || topBarStore.isSwitcherButtonVisible
     )
 
   hideTopBar.value = !shouldShow
   topBarStore.setTopBarVisible(shouldShow)
+  syncOriginalVideoTopBarVisibility(shouldShow)
   emitter.emit(TOP_BAR_VISIBILITY_CHANGE, shouldShow)
+}
+
+function syncOriginalVideoTopBarVisibility(visible: boolean) {
+  const shouldControl = !isIframeDrawerHost()
+    && isVideoOrBangumiPage()
+    && settings.value.enableTopBar
+    && settings.value.useOriginalBilibiliTopBar
+    && settings.value.videoPageTopBarConfig !== VideoPageTopBarConfig.ShowOnMouse
+
+  document.documentElement.classList.toggle(ORIGINAL_VIDEO_TOP_BAR_CONTROLLED_CLASS, shouldControl)
+  document.documentElement.classList.toggle(ORIGINAL_VIDEO_TOP_BAR_HIDDEN_CLASS, shouldControl && !visible)
 }
 
 // 处理顶栏显示/隐藏逻辑的函数
 function handleTopBarVisibility() {
-  if (isVideoOrBangumiPage() && settings.value.videoPageTopBarConfig === VideoPageTopBarConfig.ShowOnMouse) {
+  if (bewlyWidescreenActive.value)
+    return
+
+  if (isVideoOrBangumiPage()
+    && !settings.value.useOriginalBilibiliTopBar
+    && settings.value.videoPageTopBarConfig === VideoPageTopBarConfig.ShowOnMouse) {
     // 清除之前的计时器
     if (hideTimer) {
       clearTimeout(hideTimer)
       hideTimer = null
     }
 
-    // 如果鼠标在顶栏区域或顶部监听区域，或者有任何弹窗激活，或者切换器按钮可见，则显示顶栏
-    if (!isOutsideTopBar.value || !isOutsideTopArea.value || hasActivePopup.value || topBarStore.isSwitcherButtonVisible) {
+    // 如果鼠标在顶栏区域或顶部监听区域，或者有任何弹窗激活，则显示顶栏
+    if (!isOutsideTopBar.value || !isOutsideTopArea.value || hasActivePopup.value) {
       toggleTopBarVisible(true)
     }
     else {
@@ -85,10 +141,8 @@ function handleTopBarVisibility() {
       hideTimer = window.setTimeout(() => {
         // 再次检查是否有弹窗激活，防止在延迟期间有弹窗打开
         const hasActivePopupNow = hasActivePopup.value
-        const isSwitcherButtonVisibleNow = topBarStore.isSwitcherButtonVisible
-
         // 在鼠标显示模式下，如果所有弹窗都关闭且鼠标不在检测区域，则隐藏顶栏
-        if (!hasActivePopupNow && !isSwitcherButtonVisibleNow) {
+        if (!hasActivePopupNow) {
           toggleTopBarVisible(false)
         }
       }, 500) // 500ms 延迟
@@ -97,7 +151,7 @@ function handleTopBarVisibility() {
 }
 
 // 监听鼠标位置变化和相关状态
-watch([isOutsideTopBar, isOutsideTopArea, () => topBarStore.isSwitcherButtonVisible], handleTopBarVisibility)
+watch([isOutsideTopBar, isOutsideTopArea], handleTopBarVisibility)
 
 // 监听弹窗状态变化
 watch(hasActivePopup, () => {
@@ -110,9 +164,15 @@ watch(forceHideTopBar, () => {
   applyTopBarVisibility()
 })
 
-watch(() => topBarStore.isSwitcherButtonVisible, () => {
-  applyTopBarVisibility()
-})
+watch(
+  [
+    () => settings.value.enableTopBar,
+    () => settings.value.useOriginalBilibiliTopBar,
+    () => settings.value.videoPageTopBarConfig,
+    () => settings.value.autoHideTopBar,
+  ],
+  () => setupScrollListeners(),
+)
 
 // 滚动处理
 const scrollTop = ref<number>(0)
@@ -142,6 +202,9 @@ function handleScroll(arg?: number | Event): void {
       return
     }
   }
+
+  if (isUserSpacePage())
+    scheduleConflictingHeaderVisibilityUpdate()
 
   // 计算滚动距离，只有超过阈值才处理
   const scrollDelta = scrollTop.value - oldScrollTop.value
@@ -241,10 +304,19 @@ function emitTopBarScrollVisibilityChange(visible: boolean, scrollDelta: number)
 }
 
 function setupScrollListeners() {
+  // iframe 抽屉会用视频 URL 临时替换父页面地址栏。父页面顶栏仍属于原页面，
+  // 不应套用视频页的自动隐藏配置；关闭抽屉后 URL 事件会恢复常规监听。
+  if (isIframeDrawerHost()) {
+    applyTopBarVisibility()
+    cleanupScrollListeners()
+    return
+  }
+
   // 根据视频页面配置设置初始显示状态
   if (isVideoOrBangumiPage()) {
     const config = settings.value.videoPageTopBarConfig
-    if (config === VideoPageTopBarConfig.AlwaysHide || config === VideoPageTopBarConfig.ShowOnMouse) {
+    if (config === VideoPageTopBarConfig.AlwaysHide
+      || (config === VideoPageTopBarConfig.ShowOnMouse && !settings.value.useOriginalBilibiliTopBar)) {
       toggleTopBarVisible(false)
     }
     else {
@@ -257,6 +329,9 @@ function setupScrollListeners() {
 
   // 清理之前的监听器
   cleanupScrollListeners()
+  // 设置切换后从当前位置重新累计滚动距离，避免沿用上一次隐藏的锚点。
+  oldScrollTop.value = scrollTop.value
+  topBarVisibilityAnchorScrollTop.value = scrollTop.value
 
   // 在视频页面根据配置决定是否设置滚动监听
   if (isVideoOrBangumiPage()) {
@@ -289,24 +364,210 @@ function cleanupScrollListeners() {
   }
 }
 
-function updateConflictingHeaderVisibility() {
-  const hasVisibleHeader = conflictingHeaderSelectors.some((selector) => {
-    const el = document.querySelector(selector) as HTMLElement | null
-    if (!el)
-      return false
-
-    const style = window.getComputedStyle(el)
-    return style.display !== 'none'
-      && style.visibility !== 'hidden'
-      && Number.parseFloat(style.opacity) !== 0
-      && el.offsetWidth > 0
-      && el.offsetHeight > 0
-  })
-
-  forceHideTopBar.value = hasVisibleHeader
+function isVisibleElement(el: HTMLElement) {
+  const style = window.getComputedStyle(el)
+  return style.display !== 'none'
+    && style.visibility !== 'hidden'
+    && Number.parseFloat(style.opacity) !== 0
+    && el.offsetWidth > 0
+    && el.offsetHeight > 0
 }
 
-let conflictingHeaderObserver: ReturnType<typeof useMutationObserver> | undefined
+function isStickySpaceNavbarVisible() {
+  if (!isUserSpacePage())
+    return false
+
+  const navbar = document.querySelector<HTMLElement>(spaceNavbarSelector)
+  if (!navbar || !isVisibleElement(navbar))
+    return false
+
+  const style = window.getComputedStyle(navbar)
+  if (style.position !== 'sticky')
+    return false
+
+  const rect = navbar.getBoundingClientRect()
+  return rect.top <= 1 && rect.bottom > 0
+}
+
+function updateConflictingHeaderVisibility() {
+  bewlyWidescreenActive.value = isBewlyWidescreenActive()
+
+  const hasVisibleHeader = !isUserSpacePage() && conflictingHeaderSelectors.some((selector) => {
+    const el = document.querySelector(selector) as HTMLElement | null
+    return el ? isVisibleElement(el) : false
+  })
+
+  forceHideTopBar.value = hasVisibleHeader || isStickySpaceNavbarVisible()
+  applyTopBarVisibility()
+}
+
+function updateWidescreenState() {
+  const nextWidescreenActive = isBewlyWidescreenActive()
+  if (bewlyWidescreenActive.value === nextWidescreenActive)
+    return
+
+  bewlyWidescreenActive.value = nextWidescreenActive
+  applyTopBarVisibility()
+}
+
+let conflictingHeaderObserver: MutationObserver | undefined
+let widescreenStateObserver: MutationObserver | undefined
+let conflictingHeaderUpdateFrame: number | undefined
+let conflictingHeaderRebindQueued = false
+let conflictingHeaderDiscoveryTimer: ReturnType<typeof setTimeout> | undefined
+let conflictingHeaderDiscoveryDeadline = 0
+const CONFLICTING_HEADER_DISCOVERY_TIMEOUT = 15_000
+
+function isConflictingHeaderPage() {
+  return isUserSpacePage()
+    || (location.hostname === 't.bilibili.com' && /^\/\d+/.test(location.pathname))
+    || (location.hostname === 'www.bilibili.com'
+      && (/^\/read\/cv\d+/.test(location.pathname) || /^\/opus\/\d+/.test(location.pathname)))
+}
+
+function getConflictingHeaderPageRootSelector() {
+  if (isUserSpacePage())
+    return '#app'
+
+  if (location.hostname === 't.bilibili.com' || location.pathname.startsWith('/opus/'))
+    return '#opus-detail-app, #app'
+
+  return '#app, #App, .article-container, .page-content'
+}
+
+function findConflictingHeaderPageRoot() {
+  const rootSelector = getConflictingHeaderPageRootSelector()
+  const header = document.querySelector<HTMLElement>(getConflictingHeaderSelector())
+  return header?.closest<HTMLElement>(rootSelector)
+    ?? document.querySelector<HTMLElement>(rootSelector)
+}
+
+function getConflictingHeaderSelector() {
+  return isUserSpacePage() ? spaceNavbarSelector : conflictingHeaderSelector
+}
+
+function scheduleConflictingHeaderVisibilityUpdate() {
+  if (conflictingHeaderUpdateFrame !== undefined || topBarUnmounted)
+    return
+
+  conflictingHeaderUpdateFrame = requestAnimationFrame(() => {
+    conflictingHeaderUpdateFrame = undefined
+    updateConflictingHeaderVisibility()
+  })
+}
+
+function containsConflictingHeader(node: Node) {
+  return node instanceof Element
+    && (node.matches(getConflictingHeaderSelector()) || !!node.querySelector(getConflictingHeaderSelector()))
+}
+
+function scheduleConflictingHeaderObserverRefresh() {
+  if (conflictingHeaderRebindQueued || topBarUnmounted)
+    return
+
+  conflictingHeaderRebindQueued = true
+  queueMicrotask(() => {
+    conflictingHeaderRebindQueued = false
+    if (!topBarUnmounted)
+      setupConflictingHeaderObserver()
+  })
+}
+
+function stopConflictingHeaderDiscovery() {
+  if (conflictingHeaderDiscoveryTimer) {
+    clearTimeout(conflictingHeaderDiscoveryTimer)
+    conflictingHeaderDiscoveryTimer = undefined
+  }
+  conflictingHeaderDiscoveryDeadline = 0
+}
+
+function scheduleConflictingHeaderDiscovery() {
+  if (conflictingHeaderDiscoveryTimer || topBarUnmounted)
+    return
+
+  if (!conflictingHeaderDiscoveryDeadline)
+    conflictingHeaderDiscoveryDeadline = Date.now() + CONFLICTING_HEADER_DISCOVERY_TIMEOUT
+  if (Date.now() >= conflictingHeaderDiscoveryDeadline)
+    return
+
+  conflictingHeaderDiscoveryTimer = setTimeout(() => {
+    conflictingHeaderDiscoveryTimer = undefined
+    if (!isConflictingHeaderPage()) {
+      stopConflictingHeaderDiscovery()
+      return
+    }
+
+    if (document.querySelector(getConflictingHeaderSelector()))
+      setupConflictingHeaderObserver()
+    else
+      scheduleConflictingHeaderDiscovery()
+  }, 500)
+}
+
+function setupConflictingHeaderObserver() {
+  if (topBarUnmounted)
+    return
+
+  conflictingHeaderObserver?.disconnect()
+  conflictingHeaderObserver = undefined
+
+  if (!isConflictingHeaderPage()) {
+    stopConflictingHeaderDiscovery()
+    forceHideTopBar.value = false
+    bewlyWidescreenActive.value = isBewlyWidescreenActive()
+    applyTopBarVisibility()
+    return
+  }
+
+  const pageRoot = findConflictingHeaderPageRoot()
+  conflictingHeaderObserver = new MutationObserver((records) => {
+    const hasObservedAttributeChange = records.some(record => record.type === 'attributes')
+    const hasRelevantStructureChange = !pageRoot?.isConnected || records.some(record =>
+      record.type === 'childList'
+      && (Array.from(record.addedNodes).some(containsConflictingHeader)
+        || Array.from(record.removedNodes).some(containsConflictingHeader)),
+    )
+
+    if (hasRelevantStructureChange || hasObservedAttributeChange) {
+      scheduleConflictingHeaderObserverRefresh()
+      scheduleConflictingHeaderVisibilityUpdate()
+    }
+  })
+
+  if (!pageRoot) {
+    // 页面应用根尚未挂载时只观察 body 的直接子节点；找到 #app/#App 后
+    // setupConflictingHeaderObserver 会立刻收窄观察范围。
+    conflictingHeaderObserver.observe(document.body, { childList: true })
+    return
+  }
+
+  const headers = Array.from(document.querySelectorAll<HTMLElement>(getConflictingHeaderSelector()))
+  if (!headers.length) {
+    // 目标头部是懒挂载节点；发现阶段限制在当前页面应用根内。
+    conflictingHeaderObserver.observe(pageRoot, { childList: true, subtree: true })
+    scheduleConflictingHeaderDiscovery()
+  }
+  else {
+    stopConflictingHeaderDiscovery()
+    for (const header of headers) {
+      let current: HTMLElement | null = header
+      while (current) {
+        conflictingHeaderObserver.observe(current, {
+          childList: true,
+          attributes: true,
+          attributeFilter: ['class', 'style'],
+        })
+        if (current === pageRoot)
+          break
+        current = current.parentElement
+      }
+    }
+  }
+
+  if (pageRoot.parentElement)
+    conflictingHeaderObserver.observe(pageRoot.parentElement, { childList: true })
+  scheduleConflictingHeaderVisibilityUpdate()
+}
 
 // 处理点击外部关闭 POP 窗（仅在触屏优化开启时）
 function handleClickOutsidePopup(event: MouseEvent) {
@@ -334,48 +595,81 @@ function handleClickOutsidePopup(event: MouseEvent) {
 
 // 生命周期钩子
 onMounted(() => {
-  nextTick(() => {
+  nextTick(async () => {
     // 初始化数据和更新定时器
-    topBarStore.initData()
-    // 只有在登录状态下才启动更新定时器
-    if (topBarStore.isLogin)
-      topBarStore.startUpdateTimer()
+    if (document.hidden)
+      initDataDeferred = true
+    else
+      await initTopBarData()
+    if (topBarUnmounted)
+      return
+
+    // 启动定时器：已登录时同步角标/补填 userInfo；未登录时不启动轮询，
+    // 登录态由本地 Cookie 事实与事件驱动维护（见 issue #921）
+    topBarStore.startUpdateTimer()
     setupScrollListeners()
 
-    updateConflictingHeaderVisibility()
-    conflictingHeaderObserver = useMutationObserver(
-      () => document.body,
-      () => {
-        updateConflictingHeaderVisibility()
-      },
-      {
-        childList: true,
-        subtree: true,
-        attributes: true,
-        attributeFilter: ['class', 'style'],
-      },
-    ) ?? undefined
-
-    // 设置URL变化检查定时器
-    urlCheckTimer = window.setInterval(checkUrlChange, 1000)
+    setupConflictingHeaderObserver()
+    // Bewly 宽屏只通过 body class 暴露状态；仅观察 body 自身，避免重新
+    // 引入对整棵视频页 DOM 的 attributes 监听。
+    widescreenStateObserver = new MutationObserver(updateWidescreenState)
+    widescreenStateObserver.observe(document.body, {
+      attributes: true,
+      attributeFilter: ['class'],
+    })
+    window.addEventListener('pushstate', scheduleUrlChangeCheck)
+    window.addEventListener('replacestate', scheduleUrlChangeCheck)
+    window.addEventListener('popstate', scheduleUrlChangeCheck)
+    window.addEventListener('hashchange', scheduleUrlChangeCheck)
+    window.addEventListener('pageshow', scheduleUrlChangeCheck)
+    scheduleUrlChangeCheck()
 
     // 添加全局点击事件监听器（用于触屏模式下点击外部关闭弹窗）
     document.addEventListener('click', handleClickOutsidePopup)
+    // 页面重新可见时按本地 Cookie 校正登录态：覆盖「他处登录/登出后
+    // 本标签处于后台」的场景，无需轮询（见 issue #921）
+    document.addEventListener('visibilitychange', handleVisibilityChange)
   })
 })
 
+function handleVisibilityChange() {
+  if (!document.hidden) {
+    if (initDataDeferred) {
+      initDataDeferred = false
+      void initTopBarData().then(() => {
+        if (!topBarUnmounted && !document.hidden)
+          topBarStore.startUpdateTimer()
+      })
+    }
+    else {
+      topBarStore.reconcileLocalLoginState()
+      topBarStore.startUpdateTimer()
+      void topBarStore.syncSharedData().catch((error) => {
+        console.error('同步顶栏共享状态失败:', error)
+      })
+    }
+    scheduleUrlChangeCheck()
+    scheduleConflictingHeaderVisibilityUpdate()
+  }
+  else {
+    topBarStore.stopUpdateTimer()
+  }
+}
+
 onUnmounted(() => {
+  topBarUnmounted = true
   if (hideTimer) {
     clearTimeout(hideTimer)
     hideTimer = null
   }
 
-  if (urlCheckTimer) {
-    clearInterval(urlCheckTimer)
-    urlCheckTimer = null
+  conflictingHeaderObserver?.disconnect()
+  widescreenStateObserver?.disconnect()
+  stopConflictingHeaderDiscovery()
+  if (conflictingHeaderUpdateFrame !== undefined) {
+    cancelAnimationFrame(conflictingHeaderUpdateFrame)
+    conflictingHeaderUpdateFrame = undefined
   }
-
-  conflictingHeaderObserver?.stop()
 
   cleanupScrollListeners()
   // 使用 store 中的方法清理定时器
@@ -383,15 +677,34 @@ onUnmounted(() => {
 
   // 移除全局点击事件监听器
   document.removeEventListener('click', handleClickOutsidePopup)
+  document.removeEventListener('visibilitychange', handleVisibilityChange)
+  window.removeEventListener('pushstate', scheduleUrlChangeCheck)
+  window.removeEventListener('replacestate', scheduleUrlChangeCheck)
+  window.removeEventListener('popstate', scheduleUrlChangeCheck)
+  window.removeEventListener('hashchange', scheduleUrlChangeCheck)
+  window.removeEventListener('pageshow', scheduleUrlChangeCheck)
+  document.documentElement.classList.remove(
+    ORIGINAL_VIDEO_TOP_BAR_CONTROLLED_CLASS,
+    ORIGINAL_VIDEO_TOP_BAR_HIDDEN_CLASS,
+  )
 })
 
 // 快捷键
-onKeyStroke('/', () => {
+onKeyStroke('/', (event: KeyboardEvent) => {
+  const target = event.target as HTMLElement | null
+  if (target && (['INPUT', 'TEXTAREA'].includes(target.tagName) || target.isContentEditable))
+    return
+
+  const activeElement = findLeafActiveElement(document) as HTMLElement | undefined
+  if (activeElement && (['INPUT', 'TEXTAREA'].includes(activeElement.tagName) || activeElement.isContentEditable))
+    return
+
+  event.preventDefault()
   toggleTopBarVisible(true)
 })
 
 onKeyStroke('Escape', (event: KeyboardEvent) => {
-  if (!settings.value.touchScreenOptimization || !hasActivePopup.value)
+  if (!hasActivePopup.value)
     return
 
   event.preventDefault()
@@ -411,19 +724,31 @@ const VideoPageTopBarConfigEnum = VideoPageTopBarConfig
   <div class="top-bar-container">
     <!-- 顶部监听区域 -->
     <div
-      v-if="isVideoOrBangumiPage() && settings.videoPageTopBarConfig === VideoPageTopBarConfigEnum.ShowOnMouse"
+      v-if="!bewlyWidescreenActive
+        && !settings.useOriginalBilibiliTopBar
+        && isVideoOrBangumiPage()
+        && settings.videoPageTopBarConfig === VideoPageTopBarConfigEnum.ShowOnMouse"
       ref="topAreaTarget"
       class="top-area-listener"
     />
     <Transition name="top-bar">
       <header
-        v-if="topBarStore.showTopBar"
+        v-if="topBarStore.showTopBar || isLayoutEditing"
         ref="headerTarget"
         class="top-bar"
-        w="full" transition="all 300 ease-in-out"
-        :class="{ 'hide': hideTopBar, 'force-white-icon': forceWhiteIcon }"
+        data-layout-edit-target="topbar-component"
+        data-layout-edit-direct
+        data-layout-settings-menu="BewlyComponents"
+        data-layout-settings-page="topbar"
+        data-layout-settings-title-key="settings.topbar_visibility"
+        w="full"
+        :class="{
+          'hide': hideTopBar && !isLayoutEditing,
+          'force-white-icon': forceWhiteIcon,
+        }"
       >
         <TopBarHeader
+          v-if="!isLayoutEditing || !settings.useOriginalBilibiliTopBar"
           :force-white-icon="forceWhiteIcon"
           :reach-top="reachTop"
           :is-dark="isDark"
@@ -438,6 +763,13 @@ const VideoPageTopBarConfigEnum = VideoPageTopBarConfig
         </KeepAlive>
       </header>
     </Transition>
+
+    <TopBarModeSwitcher
+      v-if="settings.enableTopBar
+        && settings.useOriginalBilibiliTopBar
+        && isComponentVisible('topBarSwitcher')"
+      native
+    />
   </div>
 </template>
 
@@ -455,6 +787,10 @@ const VideoPageTopBarConfigEnum = VideoPageTopBarConfig
   right: 0;
   z-index: 999;
   position: fixed;
+  min-height: var(--bew-top-bar-height);
+  transition:
+    opacity var(--bew-duration-moderate) var(--bew-ease-standard),
+    transform var(--bew-duration-moderate) var(--bew-ease-standard);
 }
 
 .top-area-listener {

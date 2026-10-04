@@ -1,8 +1,12 @@
 <script lang="ts" setup>
 import DOMPurify from 'dompurify'
 import { computed, ref, watch } from 'vue'
+import { useI18n } from 'vue-i18n'
 
 import ALink from '~/components/ALink.vue'
+import UserAvatarLink from '~/components/UserCard/UserAvatarLink.vue'
+import { useUserRelationScope } from '~/composables/useUserRelationScope'
+import { useUserRelationStore } from '~/stores/userRelationStore'
 import api from '~/utils/api'
 import { LV0_ICON, LV1_ICON, LV2_ICON, LV3_ICON, LV4_ICON, LV5_ICON, LV6_ICON } from '~/utils/lvIcons'
 import { getCSRF } from '~/utils/main'
@@ -38,6 +42,9 @@ const props = withDefaults(defineProps<UserCardProps>(), {
 const emit = defineEmits<{
   followStateChanged: [mid: number, isFollowing: boolean]
 }>()
+const { locale, t } = useI18n()
+const userRelationStore = useUserRelationStore()
+useUserRelationScope(() => [props.mid])
 
 interface UserSample {
   id: string
@@ -52,18 +59,19 @@ const sampleList = computed(() => {
   return (props.samples || []).slice(0, 7)
 })
 
-const isFollowing = ref(props.isFollowed === 1)
+const localFollowing = ref(props.isFollowed === 1)
+const isFollowing = computed(() => userRelationStore.getFollowing(props.mid) ?? localFollowing.value)
 const isFollowLoading = ref(false)
 
 // 监听 isFollowed prop 的变化
 watch(() => props.isFollowed, (newVal) => {
-  isFollowing.value = newVal === 1
+  localFollowing.value = newVal === 1
 })
 
 const followButtonText = computed(() => {
   if (isFollowLoading.value)
     return '...'
-  return isFollowing.value ? '已关注' : '+ 关注'
+  return isFollowing.value ? t('user_card.followed') : `+ ${t('user_card.follow')}`
 })
 
 const levelIcons: string[] = [
@@ -82,12 +90,10 @@ function getLvIcon(level: number): string {
 
 // 格式化数字
 function formatNumber(num: number | undefined) {
-  if (!num)
-    return '0'
-  if (num >= 10000) {
-    return `${(num / 10000).toFixed(1)}万`
-  }
-  return num.toString()
+  return new Intl.NumberFormat(locale.value, {
+    maximumFractionDigits: 1,
+    notation: (num || 0) >= 10000 ? 'compact' : 'standard',
+  }).format(num || 0)
 }
 
 function openUserSpace() {
@@ -100,12 +106,14 @@ async function handleFollowClick(e: Event) {
   if (isFollowLoading.value)
     return
 
+  const nextFollowing = !isFollowing.value
+  const accountMid = userRelationStore.accountMid
   try {
     isFollowLoading.value = true
     const csrf = getCSRF()
 
     // act: 1=关注, 2=取关
-    const act = isFollowing.value ? 2 : 1
+    const act = nextFollowing ? 1 : 2
 
     const response = await api.user.relationModify({
       fid: String(props.mid),
@@ -115,9 +123,11 @@ async function handleFollowClick(e: Event) {
     })
 
     if (response.code === 0) {
-      isFollowing.value = !isFollowing.value
+      if (!userRelationStore.setFollowing(props.mid, nextFollowing, accountMid))
+        return
+      localFollowing.value = nextFollowing
       // 通知父组件关注状态已改变
-      emit('followStateChanged', props.mid, isFollowing.value)
+      emit('followStateChanged', props.mid, nextFollowing)
     }
     else {
       console.error('关注操作失败:', response.message)
@@ -135,10 +145,8 @@ async function handleFollowClick(e: Event) {
 <template>
   <!-- Compact模式布局 -->
   <template v-if="compact">
-    <ALink
-      :href="`https://space.bilibili.com/${mid}`"
-      type="videoCard"
-      class="user-card transition-all duration-300 cursor-pointer compact"
+    <div
+      class="user-card cursor-pointer compact"
       relative
       flex
       align-items-center
@@ -148,9 +156,19 @@ async function handleFollowClick(e: Event) {
       rounded="$bew-radius"
       cursor="pointer"
     >
-      <div flex items-center gap-5 w-full>
+      <ALink
+        :href="`https://space.bilibili.com/${mid}`"
+        :title="name"
+        :aria-label="name"
+        type="videoCard"
+        absolute inset-0
+      />
+      <div
+        relative flex items-center gap-5 w-full
+        pointer-events-none
+      >
         <!-- 左侧：头像（带角标） -->
-        <div class="avatar-wrapper-compact" relative flex-shrink-0>
+        <UserAvatarLink :mid="mid" :name="name" :live-status="liveStatus" :roomid="roomid" class="avatar-wrapper-compact">
           <img
             :src="face"
             :alt="name"
@@ -168,10 +186,10 @@ async function handleFollowClick(e: Event) {
             v-else-if="isVerified && verifyInfo"
             class="bili-avatar-icon bili-avatar-right-icon bili-avatar-icon-personal bili-avatar-size-86"
           />
-        </div>
+        </UserAvatarLink>
 
         <!-- 右侧：用户信息 + 简介 + 关注按钮 -->
-        <div flex="~ col gap-1.5" flex-1 min-w-0>
+        <div flex="~ col gap-2" flex-1 min-w-0>
           <!-- 用户名 + 等级 + 性别 -->
           <div flex items-center gap-2>
             <div
@@ -198,26 +216,22 @@ async function handleFollowClick(e: Event) {
             text="sm $bew-text-2"
             truncate
           >
-            {{ sign || '这个人很懒，什么都没有写~' }}
+            {{ sign || t('user_card.empty_bio') }}
           </div>
 
           <!-- 统计信息行 -->
           <div
-            v-if="fans || videos || liveStatus === 1"
+            v-if="fans || videos"
             flex items-center gap-3
             text="xs $bew-text-3"
           >
-            <div v-if="liveStatus === 1" flex items-center gap-1 class="live-status-badge">
-              <div i-tabler:live-photo w-3.5 h-3.5 />
-              <span>直播中</span>
-            </div>
             <div v-if="videos" flex items-center gap-1>
               <div i-tabler:video w-3.5 h-3.5 />
-              <span>{{ formatNumber(videos) }}个投稿</span>
+              <span>{{ t('user_card.submissions', { count: formatNumber(videos) }) }}</span>
             </div>
             <div v-if="fans" flex items-center gap-1>
               <div i-tabler:users w-3.5 h-3.5 />
-              <span>{{ formatNumber(fans) }}粉丝</span>
+              <span>{{ t('user_card.followers', { count: formatNumber(fans) }) }}</span>
             </div>
           </div>
 
@@ -228,6 +242,7 @@ async function handleFollowClick(e: Event) {
           >
             <button
               class="follow-button-compact"
+              pointer-events-auto
               :class="{ followed: isFollowing }"
               :disabled="isFollowLoading"
               @click="handleFollowClick"
@@ -237,13 +252,13 @@ async function handleFollowClick(e: Event) {
           </div>
         </div>
       </div>
-    </ALink>
+    </div>
   </template>
 
   <!-- 非Compact模式布局 -->
   <template v-else>
     <div
-      class="user-card transition-all duration-300 cursor-pointer"
+      class="user-card cursor-pointer"
       :class="{ horizontal }"
       relative
       flex
@@ -256,7 +271,7 @@ async function handleFollowClick(e: Event) {
       @click="openUserSpace()"
     >
       <!-- 头像 -->
-      <div class="avatar-wrapper" flex-shrink-0>
+      <UserAvatarLink :mid="mid" :name="name" :live-status="liveStatus" :roomid="roomid" class="avatar-wrapper">
         <img
           :src="face"
           :alt="name"
@@ -264,7 +279,7 @@ async function handleFollowClick(e: Event) {
           :class="horizontal ? 'w-12 h-12' : 'w-16 h-16'"
           rounded-full object-cover
         >
-      </div>
+      </UserAvatarLink>
 
       <!-- 用户信息 -->
       <div class="user-info" flex-1 min-w-0>
@@ -302,8 +317,8 @@ async function handleFollowClick(e: Event) {
           flex items-center gap-3 text="xs $bew-text-3"
           mt-1
         >
-          <span v-if="fans !== undefined">{{ formatNumber(fans) }} 粉丝</span>
-          <span v-if="videos !== undefined">{{ videos }} 视频</span>
+          <span v-if="fans !== undefined">{{ t('user_card.followers', { count: formatNumber(fans) }) }}</span>
+          <span v-if="videos !== undefined">{{ t('user_card.submissions', { count: formatNumber(videos) }) }}</span>
         </div>
 
         <div
@@ -347,6 +362,10 @@ async function handleFollowClick(e: Event) {
 .user-card {
   text-decoration: none;
   color: inherit;
+  transition:
+    background-color var(--bew-duration-moderate) var(--bew-ease-standard),
+    box-shadow var(--bew-duration-moderate) var(--bew-ease-standard),
+    transform var(--bew-duration-moderate) var(--bew-ease-emphasized);
 
   &:not(.compact):hover {
     transform: translateY(-2px);
@@ -365,7 +384,10 @@ async function handleFollowClick(e: Event) {
   &.compact {
     display: flex;
     cursor: pointer;
-    transition: all 0.2s ease;
+    transition:
+      background-color var(--bew-duration-normal) var(--bew-ease-standard),
+      box-shadow var(--bew-duration-normal) var(--bew-ease-standard),
+      transform var(--bew-duration-normal) var(--bew-ease-emphasized);
 
     &:hover {
       transform: translateY(-2px);
@@ -402,7 +424,7 @@ async function handleFollowClick(e: Event) {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  font-size: 0.875rem;
+  font-size: var(--bew-font-size-body);
   flex-shrink: 0;
 
   &.gender-male {
@@ -422,14 +444,22 @@ async function handleFollowClick(e: Event) {
 }
 
 .follow-button {
-  padding: 0.5rem 1.25rem;
-  border-radius: var(--bew-radius-half);
+  min-height: var(--bew-control-height);
+  padding: 0 var(--bew-space-5);
+  border-radius: var(--bew-interactive-radius);
   background: var(--bew-theme-color);
   color: white;
-  font-size: 0.875rem;
+  font-size: var(--bew-font-size-control);
+  font-weight: var(--bew-font-weight-semibold);
+  line-height: var(--bew-line-height-control);
   border: none;
   cursor: pointer;
-  transition: all 0.2s ease;
+  transition:
+    color var(--bew-duration-normal) var(--bew-ease-standard),
+    background-color var(--bew-duration-normal) var(--bew-ease-standard),
+    border-color var(--bew-duration-normal) var(--bew-ease-standard),
+    filter var(--bew-duration-normal) var(--bew-ease-standard),
+    transform var(--bew-duration-normal) var(--bew-ease-emphasized);
   white-space: nowrap;
   min-width: 80px;
 
@@ -457,14 +487,14 @@ async function handleFollowClick(e: Event) {
 .sample-list {
   display: grid;
   grid-template-columns: repeat(7, minmax(0, 1fr));
-  gap: 0.75rem;
-  margin-top: 0.75rem;
+  gap: var(--bew-space-3);
+  margin-top: var(--bew-space-3);
 }
 
 .sample-card {
   display: flex;
   flex-direction: column;
-  gap: 0.5rem;
+  gap: var(--bew-space-2);
   cursor: pointer;
 
   &:hover .sample-title {
@@ -476,7 +506,7 @@ async function handleFollowClick(e: Event) {
   position: relative;
   width: 100%;
   aspect-ratio: 16 / 9;
-  border-radius: calc(var(--bew-radius-half) - 2px);
+  border-radius: var(--bew-radius-sm);
   overflow: hidden;
   background: var(--bew-skeleton);
 
@@ -489,25 +519,25 @@ async function handleFollowClick(e: Event) {
 
 .sample-duration {
   position: absolute;
-  bottom: 0.5rem;
-  right: 0.5rem;
-  padding: 0.125rem 0.5rem;
-  border-radius: 999px;
-  font-size: 0.75rem;
+  bottom: var(--bew-space-2);
+  right: var(--bew-space-2);
+  padding: var(--bew-space-0-5) var(--bew-space-2);
+  border-radius: var(--bew-badge-radius);
+  font-size: var(--bew-font-size-control);
   background: rgba(0, 0, 0, 0.65);
   color: #fff;
 }
 
 .sample-play {
   position: absolute;
-  left: 0.5rem;
-  bottom: 0.5rem;
+  left: var(--bew-space-2);
+  bottom: var(--bew-space-2);
   display: inline-flex;
   align-items: center;
-  gap: 0.25rem;
-  padding: 0.125rem 0.5rem;
-  border-radius: 999px;
-  font-size: 0.75rem;
+  gap: var(--bew-space-1);
+  padding: var(--bew-space-0-5) var(--bew-space-2);
+  border-radius: var(--bew-badge-radius);
+  font-size: var(--bew-font-size-control);
   color: #fff;
   background: rgba(0, 0, 0, 0.5);
 
@@ -517,9 +547,9 @@ async function handleFollowClick(e: Event) {
 }
 
 .sample-title {
-  font-size: 0.8125rem;
+  font-size: var(--bew-font-size-control);
   color: var(--bew-text-1);
-  line-height: 1.35;
+  line-height: var(--bew-line-height-control);
   display: -webkit-box;
   -webkit-line-clamp: 2;
   -webkit-box-orient: vertical;
@@ -573,20 +603,23 @@ async function handleFollowClick(e: Event) {
   }
 }
 
-.live-status-badge {
-  color: var(--bew-theme-color);
-  font-weight: 500;
-}
-
 .follow-button-compact {
-  padding: 0.35rem 0.75rem;
-  border-radius: var(--bew-radius-half);
+  min-height: 28px;
+  padding: 0 var(--bew-space-3);
+  border-radius: var(--bew-interactive-radius);
   background: var(--bew-theme-color);
   color: white;
-  font-size: 0.875rem;
+  font-size: var(--bew-font-size-control);
+  font-weight: var(--bew-font-weight-semibold);
+  line-height: var(--bew-line-height-control);
   border: 1px solid var(--bew-theme-color);
   cursor: pointer;
-  transition: all 0.2s ease;
+  transition:
+    color var(--bew-duration-normal) var(--bew-ease-standard),
+    background-color var(--bew-duration-normal) var(--bew-ease-standard),
+    border-color var(--bew-duration-normal) var(--bew-ease-standard),
+    filter var(--bew-duration-normal) var(--bew-ease-standard),
+    transform var(--bew-duration-normal) var(--bew-ease-emphasized);
   white-space: nowrap;
   min-width: 60px;
   user-select: none;

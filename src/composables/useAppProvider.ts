@@ -18,13 +18,25 @@ export enum DrawerType {
   NotificationsDrawer = 'notifications',
 }
 
+export type SettingsMenu = 'General' | 'BewlyPages' | 'BewlyComponents' | 'Bilibili' | 'Appearance' | 'Shortcuts' | 'About'
+
+export interface SettingsNavigationTarget {
+  menu: SettingsMenu
+  secondaryPage?: string
+  targetTitleKey?: string
+}
+
 export interface BewlyAppProvider {
   activatedPage: Ref<AppPage>
   // 添加Home页面的子页面状态
   homeActivatedPage: Ref<HomeSubPage>
   homeActivatedPageTouched: Ref<boolean>
+  isHomeTabSwitching: Ref<boolean>
   scrollViewportRef: Ref<HTMLElement | null>
   reachTop: Ref<boolean>
+  // 当前页面滚动位置（文档滚动或 Bewly 视口滚动，单位 px）；供顶栏遮罩等需要连续强度的场景使用
+  scrollTop: Ref<number>
+  searchFocusOverlayActive: Ref<boolean>
   mainAppRef: Ref<HTMLElement>
   handleReachBottom: Ref<(() => void) | undefined>
   handlePageRefresh: Ref<(() => void) | undefined>
@@ -40,6 +52,8 @@ export interface BewlyAppProvider {
   // 添加活跃抽屉状态
   activeDrawer: Ref<DrawerType>
   setActiveDrawer: (drawer: DrawerType) => void
+  pendingSettingsNavigation: Ref<SettingsNavigationTarget | undefined>
+  openSettings: (target?: SettingsNavigationTarget) => void
 }
 
 export function useBewlyApp(): BewlyAppProvider {

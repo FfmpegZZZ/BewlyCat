@@ -11,6 +11,7 @@ import type { HistoryResult, List as HistoryItem } from '~/models/history/histor
 import { Business } from '~/models/history/history'
 import api from '~/utils/api'
 import { calcCurrentTime } from '~/utils/dataFormatter'
+import { getHistoryUrl } from '~/utils/history'
 import { getCSRF, removeHttpFromUrl, scrollToTop } from '~/utils/main'
 
 const { t } = useI18n()
@@ -39,6 +40,8 @@ const activatedTab = ref<number>(0)
 const isLoading = ref<boolean>(false)
 // when noMoreContent is true, the user can't scroll down to load more content
 const noMoreContent = ref<boolean>(false)
+// API 报错时为 true
+const loadFailed = ref<boolean>(false)
 const livePage = ref<number>(1)
 const historysWrap = ref<HTMLElement>() as Ref<HTMLElement>
 
@@ -82,6 +85,21 @@ function handleReachBottom() {
   }
 }
 
+function retryHistoryList() {
+  noMoreContent.value = false
+  const lastViewAt = historys[historys.length - 1]?.view_at ?? 0
+
+  if (activatedTab.value === 0) {
+    getHistoryList(Business.ARCHIVE, lastViewAt)
+  }
+  else if (activatedTab.value === 1) {
+    getHistoryList(Business.LIVE, lastViewAt)
+  }
+  else if (activatedTab.value === 2) {
+    getHistoryList(Business.ARTICLE, lastViewAt)
+  }
+}
+
 useOptimizedScroll(
   historysWrap,
   { onReachBottom: handleReachBottom },
@@ -102,35 +120,6 @@ function onClickTab(tabId: number) {
 }
 
 /**
- * Return the URL of the history item
- * @param item history item
- * @return {string} url
- */
-function getHistoryUrl(item: HistoryItem) {
-  if (item.uri)
-    return item.uri
-
-  // Video
-  if (item.history.business === Business.ARCHIVE) {
-    if (item?.videos && item.videos > 0)
-      return `//www.bilibili.com/video/${item.history.bvid}?p=${item.history.page}`
-    return `//www.bilibili.com/video/${item.history.bvid}`
-  }
-  // Live
-  else if (item.history.business === Business.LIVE) {
-    return `//live.bilibili.com/${item.history.oid}`
-  }
-  // Article
-  else if (item.history.business === Business.ARTICLE || item.history.business === Business.ARTICLE_LIST) {
-    if (item.history.cid === 0)
-      return `//www.bilibili.com/read/cv${item.history.oid}`
-    else
-      return `//www.bilibili.com/read/cv${item.history.cid}`
-  }
-  return ''
-}
-
-/**
  * Get history list
  * @param type
  * @param view_at Last viewed timestamp
@@ -142,6 +131,7 @@ async function getHistoryList(type: Business, view_at = 0 as number) {
     return
 
   isLoading.value = true
+  loadFailed.value = false
 
   try {
     const res: HistoryResult = await api.history.getHistoryList({
@@ -151,7 +141,7 @@ async function getHistoryList(type: Business, view_at = 0 as number) {
 
     if (res.code === 0) {
       // 如果返回的数据为空，说明没有更多内容了
-      if (!res.data.list || res.data.list.length === 0) {
+      if (!res.data?.list || res.data.list.length === 0) {
         noMoreContent.value = true
         return
       }
@@ -161,9 +151,16 @@ async function getHistoryList(type: Business, view_at = 0 as number) {
         historys.push(...res.data.list)
       }
     }
+    else {
+      console.error('Failed to load history list:', res)
+      loadFailed.value = true
+      noMoreContent.value = false
+    }
   }
   catch (error) {
     console.error('Failed to load history list:', error)
+    loadFailed.value = true
+    noMoreContent.value = false
   }
   finally {
     isLoading.value = false
@@ -206,14 +203,12 @@ defineExpose({
 
 <template>
   <div
-    style="backdrop-filter: var(--bew-filter-glass-1);"
     h="[calc(100vh-100px)]" max-h-500px important-overflow-y-overlay
     bg="$bew-elevated"
     w="380px"
-    rounded="$bew-radius"
     pos="relative"
-    shadow="[var(--bew-shadow-edge-glow-1),var(--bew-shadow-3)]"
-    border="1 $bew-border-color"
+    shadow="$bew-shadow-3"
+    border="1 $bew-popover-border-color"
     class="history-pop bew-popover"
     data-key="history"
     flex="~ col"
@@ -221,10 +216,9 @@ defineExpose({
     <!-- top bar -->
     <header
       flex="~ items-center justify-between"
-      p="x-6"
+      p="x-6 y-5"
       pos="sticky top-0 left-0"
       w="full"
-      h-50px
       z="2"
     >
       <div flex="~">
@@ -232,7 +226,7 @@ defineExpose({
           v-for="tab in historyTabs"
           :key="tab.id"
           m="r-4"
-          transition="all duration-300"
+          transition="background-color duration-200, color duration-200, opacity duration-200"
           class="tab"
           :class="tab.isSelected ? 'tab-selected' : ''"
           cursor="pointer"
@@ -254,9 +248,8 @@ defineExpose({
     <main
       ref="historysWrap"
       overflow-y-auto
-      rounded="$bew-radius"
       flex="~ col gap-2"
-      p="x-4"
+      p="x-3"
       flex-1
       min-h-0
       pos="relative"
@@ -270,13 +263,24 @@ defineExpose({
 
       <!-- empty -->
       <Empty
-        v-if="!isLoading && historys.length === 0"
+        v-if="!isLoading && !loadFailed && historys.length === 0"
         pos="absolute top-0 left-0"
-        bg="$bew-content"
         z="0" w="full" h="full"
         flex="~ items-center"
-        rounded="$bew-radius"
       />
+
+      <!-- load failed -->
+      <Empty
+        v-if="!isLoading && loadFailed && historys.length === 0"
+        :description="$t('common.load_failed')"
+        pos="absolute top-0 left-0"
+        z="0" w="full" h="full"
+        flex="~ col items-center justify-center"
+      >
+        <Button type="secondary" size="small" @click="retryHistoryList">
+          {{ $t('common.operation.refresh') }}
+        </Button>
+      </Empty>
 
       <!-- historys -->
       <TransitionGroup name="list">
@@ -285,21 +289,17 @@ defineExpose({
           :key="historyItem.kid"
           :href="getHistoryUrl(historyItem)"
           type="topBar"
-          class="group"
+          class="group bew-content-card"
           m="last:b-4" p="2"
-          rounded="$bew-radius"
           hover:bg="$bew-fill-2"
           duration-300
         >
-          <section flex="~ gap-4 item-start">
+          <section flex="~ gap-4 items-start">
             <!-- Video cover, live cover, ariticle cover -->
             <div
+              class="bew-top-bar-media-column"
               bg="$bew-skeleton"
               pos="relative"
-              w="150px"
-              flex="shrink-0"
-              border="rounded-$bew-radius-half"
-              overflow="hidden"
             >
               <!-- Delete button -->
               <div
@@ -318,13 +318,12 @@ defineExpose({
 
               <!-- Video -->
               <template v-if="activatedTab === 0">
-                <div pos="relative">
+                <div class="bew-top-bar-media-frame">
                   <img
-                    w="150px" h-full
-                    class="aspect-video"
+                    w-full h-full
                     :src="`${removeHttpFromUrl(
                       historyItem.cover,
-                    )}@256w_144h_1c`"
+                    )}@320w_180h_1c`"
                     :alt="historyItem.title"
                     object-cover
                   >
@@ -356,15 +355,14 @@ defineExpose({
 
               <!-- Live -->
               <template v-else-if="activatedTab === 1">
-                <div pos="relative">
+                <div class="bew-top-bar-media-frame">
                   <img
-                    w="150px"
-                    class="aspect-video"
+                    w-full h-full
                     :src="`${removeHttpFromUrl(
                       historyItem.cover,
-                    )}@256w_144h_1c`"
+                    )}@320w_180h_1c`"
                     :alt="historyItem.title"
-                    bg="contain"
+                    object-cover
                   >
                   <div
                     v-if="historyItem.live_status === 1"
@@ -394,15 +392,14 @@ defineExpose({
               </template>
 
               <!-- Article -->
-              <div v-else-if="activatedTab === 2">
+              <div v-else-if="activatedTab === 2" class="bew-top-bar-media-frame">
                 <img
-                  w="150px"
-                  class="aspect-video"
+                  w-full h-full
                   :src="`${
                     Array.isArray(historyItem.covers)
                       ? historyItem.covers[0]
                       : ''
-                  }@256w_144h_1c`"
+                  }@320w_180h_1c`"
                   object-cover
                   :alt="historyItem.title"
                   bg="contain"
@@ -411,20 +408,19 @@ defineExpose({
             </div>
 
             <!-- Description -->
-            <div>
+            <div class="bew-top-bar-media-copy">
               <h3
-                class="keep-two-lines"
-                overflow="hidden"
-                text="ellipsis"
-                break-anywhere
+                :title="historyItem.title"
+                class="bew-top-bar-media-title"
               >
                 {{ historyItem.title }}
               </h3>
-              <div text="$bew-text-2 sm" m="t-4" flex="~" align="items-center">
+              <div text="$bew-text-2" m="t-2" flex="~ items-center">
                 <ALink
                   :href="`https://space.bilibili.com/${historyItem.author_mid}`"
                   type="topBar"
                   :stop-propagation="true"
+                  class="bew-top-bar-media-author"
                 >
                   {{ historyItem.author_name }}
                 </ALink>
@@ -440,7 +436,7 @@ defineExpose({
                   <i i-svg-spinners:pulse-3 align-middle mt--0.2em />
                 </span>
               </div>
-              <p text="$bew-text-2 sm">
+              <p class="bew-top-bar-media-meta" text="$bew-text-2">
                 {{
                   useDateFormat(
                     historyItem.view_at * 1000,
@@ -452,6 +448,17 @@ defineExpose({
           </section>
         </ALink>
       </TransitionGroup>
+      <div
+        v-if="!isLoading && loadFailed && historys.length > 0"
+        flex="~ items-center justify-center gap-2"
+        m="b-4"
+        text="$bew-text-2 sm"
+      >
+        <span>{{ $t('common.load_failed') }}</span>
+        <Button type="tertiary" size="small" @click="retryHistoryList">
+          {{ $t('common.operation.refresh') }}
+        </Button>
+      </div>
       <!-- loading -->
       <Transition name="fade">
         <Loading v-if="isLoading && historys.length !== 0" m="b-4" />
@@ -463,16 +470,17 @@ defineExpose({
 <style lang="scss" scoped>
 .tab {
   --uno: "relative text-$bew-text-2";
+  font-weight: var(--bew-font-weight-semibold);
 
   &::after {
     --uno: "absolute bottom-0 left-0 w-full h-12px bg-$bew-theme-color opacity-0 transform scale-x-0 -z-1";
-    --uno: "transition-all duration-300";
+    --uno: "transition-colors duration-200";
     content: "";
   }
 }
 
 .tab-selected {
-  --uno: "font-bold text-$bew-text-1";
+  --uno: "text-$bew-text-1";
 
   &::after {
     --uno: "scale-x-80 opacity-40";

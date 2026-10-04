@@ -1,13 +1,13 @@
-.large-header {
-  background-color: transparent !important;
-}
-
 .bewly-design {
-  // Implement specific modifications to the page, like tweaking the layout, and place those styles here
-  .bili-header .slide-down,
-  .bili-header .mini-header {
-    background-color: var(--bew-elevated) !important;
-    backdrop-filter: var(--bew-filter-glass-1);
+  .bili-header.large-header {
+    background-color: transparent !important;
+  }
+
+  // 只适配实际栏体，避免命中后代状态类。使用实色底，避免毛玻璃改变
+  // 浮层的包含块与合成层，也确保关闭毛玻璃或调整透明度时入口仍可读。
+  .bili-header > .bili-header__bar:is(.slide-down, .mini-header) {
+    background-color: var(--bew-elevated-solid) !important;
+    backdrop-filter: none;
   }
 
   // #region theme color adaption part

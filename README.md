@@ -41,12 +41,13 @@
 5. 新增合集播放自动关闭功能（需要在设置里开启），方便挂合集听歌。
 6. 新增web模式推荐按照点赞/播放比例过滤视频的能力（需要设置里开启）
 7. 参考了`Extension for Bilibili Player`插件的快捷键，支持了其中大部分功能的自定义快捷键。
-8. 音量均衡功能，可以自定义每个UP的音量相比基准音量增减
-9. 记住倍速比例功能，开启后会记住上次倍速
-10. 合集视频随机播放功能
-11. 视频详情页稍后再看外置
-12. 自定义暗色基准色，开启后会根据基准色调整暗黑模式的显示
-13. 新增合集视频保持默认播放模式功能
+8. 记住倍速比例功能，开启后会记住上次倍速
+9. 合集视频随机播放功能
+10. 视频详情页稍后再看外置
+11. 自定义暗色基准色，开启后会根据基准色调整暗黑模式的显示
+12. 新增合集视频保持默认播放模式功能
+
+13. 局部音量均衡：在「设置 → Bilibili → 播放器 → 音量均衡」启用，平衡不同视频之间的音量，并通过播放器组件关闭原生均衡。支持目标响度、强度调整及运行状态显示，详见[算法与资源管理](docs/local-loudness.md)。
 
 ### 删除功能
 
@@ -117,7 +118,3 @@
 [bilibili-app-recommend](https://github.com/magicdawn/bilibili-app-recommend) - 获取访问密钥的参考来源
 - [Bilibili-Evolved](https://github.com/the1812/Bilibili-Evolved) - 部分功能实现
 - [bilibili-API-collect](https://github.com/SocialSisterYi/bilibili-API-collect)
-
-## Star History
-
-[![Star History Chart](https://api.star-history.com/svg?repos=keleus/BewlyCat&type=Date)](https://www.star-history.com/#keleus/BewlyCat&Date)

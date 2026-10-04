@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { useToast } from 'vue-toastification'
 
 import Button from '~/components/Button.vue' // Assuming Button component exists
 import Radio from '~/components/Radio.vue'
@@ -13,8 +14,11 @@ import { setupShortcutHandlers } from '~/utils/shortcuts'
 
 import SettingsItem from '../components/SettingsItem.vue'
 import SettingsItemGroup from '../components/SettingsItemGroup.vue'
+import SettingsSectionHeading from '../components/SettingsSectionHeading.vue'
+import ShortcutSection from './ShortcutSection.vue'
 
 const { t } = useI18n()
+const toast = useToast()
 
 // --- 类型定义 ---
 interface OfficialShortcut {
@@ -70,6 +74,7 @@ const configurableShortcutsGroups: ShortcutGroup[] = [
       { id: 'danmuStatus', name: t('settings.shortcuts.danmu_status'), description: t('settings.shortcuts.danmu_status_desc'), defaultKey: 'Shift+D' },
       { id: 'webFullscreen', name: t('settings.shortcuts.web_fullscreen'), description: t('settings.shortcuts.web_fullscreen_desc'), defaultKey: 'Shift+W' },
       { id: 'widescreen', name: t('settings.shortcuts.widescreen'), description: t('settings.shortcuts.widescreen_desc'), defaultKey: 'T' },
+      { id: 'bewlyWidescreen', name: t('settings.shortcuts.bewly_widescreen'), description: t('settings.shortcuts.bewly_widescreen_desc'), defaultKey: 'Shift+T' },
       { id: 'shortStepBackward', name: t('settings.shortcuts.short_step_backward'), description: t('settings.shortcuts.short_step_backward_desc'), defaultKey: 'J' },
       { id: 'longStepBackward', name: t('settings.shortcuts.long_step_backward'), description: t('settings.shortcuts.long_step_backward_desc'), defaultKey: 'Shift+J' },
       { id: 'playPause', name: t('settings.shortcuts.play_pause_ext'), description: t('settings.shortcuts.play_pause_ext_desc'), defaultKey: 'K' }, // Renamed to avoid conflict if 'playPause' is used for official
@@ -78,6 +83,7 @@ const configurableShortcutsGroups: ShortcutGroup[] = [
       { id: 'pip', name: t('settings.shortcuts.pip'), description: t('settings.shortcuts.pip_desc'), defaultKey: 'P' },
       { id: 'turnOffLight', name: t('settings.shortcuts.turn_off_light'), description: t('settings.shortcuts.turn_off_light_desc'), defaultKey: 'I' },
       { id: 'caption', name: t('settings.shortcuts.caption'), description: t('settings.shortcuts.caption_desc'), defaultKey: 'C' },
+      { id: 'videoScreenshot', name: t('settings.shortcuts.video_screenshot'), description: t('settings.shortcuts.video_screenshot_desc'), defaultKey: 'Shift+S' },
       { id: 'increasePlaybackRate', name: t('settings.shortcuts.increase_playback_rate'), description: t('settings.shortcuts.increase_playback_rate_desc'), defaultKey: '+' },
       { id: 'decreasePlaybackRate', name: t('settings.shortcuts.decrease_playback_rate'), description: t('settings.shortcuts.decrease_playback_rate_desc'), defaultKey: '-' },
       { id: 'resetPlaybackRate', name: t('settings.shortcuts.reset_playback_rate'), description: t('settings.shortcuts.reset_playback_rate_desc'), defaultKey: '0' },
@@ -103,6 +109,12 @@ const configurableShortcutsGroups: ShortcutGroup[] = [
 // --- Reactive State ---
 const editingShortcutId = ref<ConfigurableShortcutId | null>(null)
 const currentKeyCombo = ref<string[]>([])
+
+const vFocusShortcutEditor = {
+  mounted(element: HTMLElement) {
+    element.focus({ preventScroll: true })
+  },
+}
 
 // --- Helper Functions ---
 function getShortcutSetting(id: ConfigurableShortcutId): BaseShortcutSetting | undefined {
@@ -150,8 +162,6 @@ function startEditShortcut(id: ConfigurableShortcutId) {
 }
 
 function saveShortcutKey(id: ConfigurableShortcutId, newKey: string) {
-  console.log('Saving shortcut key:', id, newKey)
-
   // 确保settings.value.shortcuts存在
   if (!settings.value.shortcuts) {
     settings.value.shortcuts = {}
@@ -159,19 +169,7 @@ function saveShortcutKey(id: ConfigurableShortcutId, newKey: string) {
 
   // 如果快捷键设置不存在，创建一个新的
   if (!settings.value.shortcuts[id]) {
-    // 查找默认配置
-    const shortcutDef = configurableShortcutsGroups
-      .flatMap(group => group.shortcuts)
-      .find(def => def.id === id)
-
-    if (shortcutDef) {
-      // 创建基本设置
-      settings.value.shortcuts[id] = { key: newKey, enabled: true }
-    }
-    else {
-      // 如果找不到定义，创建基本设置
-      settings.value.shortcuts[id] = { key: newKey, enabled: true }
-    }
+    settings.value.shortcuts[id] = { key: newKey, enabled: true }
   }
   else {
     // 更新现有设置
@@ -220,14 +218,14 @@ function handleKeyDown(event: KeyboardEvent, id: ConfigurableShortcutId) {
 
   // 处理主按键
   let mainKey = event.key
+  if (mainKey === ' ') {
+    mainKey = 'Space'
+  }
   // 对于单字符按键转为大写
-  if (mainKey.length === 1) {
+  else if (mainKey.length === 1) {
     mainKey = mainKey.toUpperCase()
   }
   // 特殊按键处理
-  else if (mainKey === ' ') {
-    mainKey = 'Space'
-  }
   else if (mainKey === 'ArrowUp') {
     mainKey = '↑'
   }
@@ -286,7 +284,7 @@ function handleKeyUp(event: KeyboardEvent, id: ConfigurableShortcutId) {
       const conflictResult = checkShortcutConflict(keyCombo, id)
 
       if (conflictResult.hasConflict && conflictResult.conflictInfo) {
-        alert(`此快捷键已被插件快捷键"${conflictResult.conflictInfo.name}"使用，不能重复设置。`)
+        toast.warning(t('settings.shortcuts.conflict', { name: conflictResult.conflictInfo.name }))
         cancelEdit()
       }
       else {
@@ -298,56 +296,90 @@ function handleKeyUp(event: KeyboardEvent, id: ConfigurableShortcutId) {
 
 // --- Reset and Toggle Functions ---
 function resetToDefault(shortcutDef: ConfigurableShortcutDefinition) {
+  const defaultSetting = getDefaultShortcutSetting(shortcutDef.id)
+  if (!defaultSetting)
+    return
+
+  const conflictResult = checkShortcutConflict(defaultSetting.key, shortcutDef.id)
+  if (conflictResult.hasConflict && conflictResult.conflictInfo) {
+    toast.warning(t('settings.shortcuts.conflict', { name: conflictResult.conflictInfo.name }))
+    return
+  }
+
+  cancelEdit()
   if (!settings.value.shortcuts)
     settings.value.shortcuts = {}
-
-  const defaultSetting = getDefaultShortcutSetting(shortcutDef.id)
-  if (defaultSetting) {
-    settings.value.shortcuts[shortcutDef.id] = JSON.parse(JSON.stringify(defaultSetting)) // Deep copy
-  }
-  else {
-    // Fallback if not in originalSettings (should not happen with proper setup)
-    const baseDefault: BaseShortcutSetting = { key: shortcutDef.defaultKey, enabled: true }
-    settings.value.shortcuts[shortcutDef.id] = baseDefault
-  }
-
-  // 重新注册快捷键
+  settings.value.shortcuts[shortcutDef.id] = { ...defaultSetting }
   setupShortcutHandlers()
 }
 
+// 只保存最近一次重置前的配置，撤销时整体恢复。
+const shortcutResetSnapshot = ref<ShortcutsSettings>()
+
 function resetAllShortcuts() {
+  cancelEdit()
+  shortcutResetSnapshot.value = JSON.parse(JSON.stringify(settings.value.shortcuts ?? {}))
   if (!settings.value.shortcuts)
     settings.value.shortcuts = {}
 
   configurableShortcutsGroups.forEach((group) => {
     group.shortcuts.forEach((shortcutDef) => {
       const defaultSetting = getDefaultShortcutSetting(shortcutDef.id)
-      if (defaultSetting && settings.value.shortcuts) {
+      if (defaultSetting)
         settings.value.shortcuts[shortcutDef.id] = JSON.parse(JSON.stringify(defaultSetting))
-      }
     })
   })
 
-  // 重新注册快捷键
+  setupShortcutHandlers()
+}
+
+function undoResetAllShortcuts() {
+  if (!shortcutResetSnapshot.value)
+    return
+  cancelEdit()
+  settings.value.shortcuts = shortcutResetSnapshot.value
+  shortcutResetSnapshot.value = undefined
   setupShortcutHandlers()
 }
 </script>
 
 <template>
   <div>
+    <SettingsSectionHeading
+      :title="t('settings.shortcuts.title')"
+      :desc="t('settings.category_shortcuts_desc')"
+      icon="i-mingcute:keyboard-fill"
+    />
+
     <!-- General Keyboard Toggle -->
     <SettingsItemGroup>
       <SettingsItem :title="t('settings.shortcuts.enable_all_shortcuts_toggle')" right-width="auto">
         <template #desc>
           <div v-html="t('settings.shortcuts.enable_all_shortcuts_toggle_desc')" />
         </template>
-        <Radio v-model="settings.keyboard" />
+        <Radio v-model="settings.keyboard" @update:model-value="setupShortcutHandlers" />
+      </SettingsItem>
+      <SettingsItem :title="t('settings.shortcuts.reset_all_ext_shortcuts')" right-width="auto">
+        <template #desc>
+          <span v-if="shortcutResetSnapshot" role="status">{{ t('settings.shortcuts.reset_undo_hint') }}</span>
+        </template>
+        <div class="shortcut-reset-actions">
+          <Button @click="resetAllShortcuts">
+            {{ t('settings.shortcuts.reset_all_button') }}
+          </Button>
+          <Button v-if="shortcutResetSnapshot" @click="undoResetAllShortcuts">
+            {{ t('settings.shortcuts.undo_reset') }}
+          </Button>
+        </div>
       </SettingsItem>
     </SettingsItemGroup>
 
     <!-- Configurable Extension Shortcuts -->
     <template v-for="group in configurableShortcutsGroups" :key="group.title">
-      <SettingsItemGroup :title="group.title">
+      <ShortcutSection
+        :title="group.title"
+        default-open
+      >
         <template v-for="shortcutDef in group.shortcuts" :key="shortcutDef.id">
           <SettingsItem :title="shortcutDef.name" :desc="shortcutDef.description" right-width="auto">
             <div class="shortcut-item-config">
@@ -356,6 +388,7 @@ function resetAllShortcuts() {
                 <!-- Shortcut Key Display/Edit -->
                 <div
                   v-if="editingShortcutId === shortcutDef.id"
+                  v-focus-shortcut-editor
                   class="shortcut-edit-box border rounded px-3 py-1 text-center text-sm"
                   tabindex="0"
                   @keydown="handleKeyDown($event, shortcutDef.id)"
@@ -372,7 +405,7 @@ function resetAllShortcuts() {
                 <div class="shortcut-actions flex gap-1">
                   <button
                     v-if="editingShortcutId !== shortcutDef.id"
-                    class="edit-btn p-1 rounded hover:bg-gray-200 dark:hover:bg-gray-700"
+                    class="edit-btn p-1 rounded hover:bg-$bew-fill-2"
                     :title="t('settings.shortcuts.item.edit_key')"
                     @click="startEditShortcut(shortcutDef.id)"
                   >
@@ -380,14 +413,14 @@ function resetAllShortcuts() {
                   </button>
                   <button
                     v-if="editingShortcutId === shortcutDef.id"
-                    class="cancel-btn p-1 rounded hover:bg-gray-200 dark:hover:bg-gray-700"
+                    class="cancel-btn p-1 rounded hover:bg-$bew-fill-2"
                     :title="t('settings.shortcuts.item.cancel_edit')"
                     @click="cancelEdit"
                   >
                     <i i-mingcute:close-line />
                   </button>
                   <button
-                    class="reset-btn p-1 rounded hover:bg-gray-200 dark:hover:bg-gray-700"
+                    class="reset-btn p-1 rounded hover:bg-$bew-fill-2"
                     :title="t('settings.shortcuts.item.reset_default')"
                     @click="resetToDefault(shortcutDef)"
                   >
@@ -409,20 +442,11 @@ function resetAllShortcuts() {
             </div>
           </SettingsItem>
         </template>
-      </SettingsItemGroup>
+      </ShortcutSection>
     </template>
 
-    <!-- Global Actions -->
-    <SettingsItemGroup :title="t('settings.shortcuts.group.global_actions')">
-      <SettingsItem :title="t('settings.shortcuts.reset_all_ext_shortcuts')" right-width="auto">
-        <Button @click="resetAllShortcuts">
-          {{ t('settings.shortcuts.reset_all_button') }}
-        </Button>
-      </SettingsItem>
-    </SettingsItemGroup>
-
     <!-- Official Bilibili Shortcuts (Read-only) -->
-    <SettingsItemGroup :title="t('settings.shortcuts.group.official_bilibili')">
+    <ShortcutSection :title="t('settings.shortcuts.group.official_bilibili')">
       <SettingsItem
         v-for="shortcut in officialShortcuts"
         :key="shortcut.key"
@@ -434,11 +458,18 @@ function resetAllShortcuts() {
           {{ shortcut.key }}
         </div>
       </SettingsItem>
-    </SettingsItemGroup>
+    </ShortcutSection>
   </div>
 </template>
 
 <style lang="scss" scoped>
+.shortcut-reset-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--bew-space-2);
+}
+
 .shortcut-key-readonly,
 .shortcut-key {
   background-color: var(--bew-elevated-solid);
@@ -470,20 +501,11 @@ function resetAllShortcuts() {
   user-select: none;
   outline: none;
   &:focus {
-    outline: 2px solid var(--bew-primary);
+    outline: 2px solid var(--bew-theme-color);
   }
   &:focus-visible {
-    outline: 2px solid var(--bew-primary);
+    outline: 2px solid var(--bew-theme-color);
   }
-}
-
-.specific-config select,
-.specific-config input[type="radio"] {
-  color: var(--bew-text-1); // Ensure text color matches theme
-}
-.specific-config option {
-  background-color: var(--bew-bg); // Ensure dropdown options have background
-  color: var(--bew-text-1);
 }
 
 // Ensure buttons in shortcut actions are vertically aligned

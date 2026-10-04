@@ -1,52 +1,63 @@
-* {
+// This bundle is also injected into the native document. Generic rules must
+// stay inside our UI or pages that explicitly enable style adaptation.
+:where(.bewly-wrapper, .bewly-wrapper *, .bewly-design, .bewly-design *) {
   outline-color: var(--bew-theme-color-80);
   font-feature-settings: "tnum";
   // outline-width: 2px;
   // outline-offset: 2px;
 }
 
-.dark {
+:host(.dark),
+.bewly-wrapper.dark,
+.bewly-design.dark {
   input,
   textarea {
     color-scheme: dark;
   }
 }
 
-::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
-}
+:host,
+:host *,
+:where(.bewly-wrapper, .bewly-wrapper *, .bewly-design, .bewly-design *) {
+  &::-webkit-scrollbar {
+    width: 6px;
+    height: 6px;
+  }
 
-::-webkit-scrollbar-track {
-  background: transparent;
-}
+  &::-webkit-scrollbar-track {
+    background: transparent;
+  }
 
-html.bewly-design > ::-webkit-scrollbar-track {
-  background: var(--bew-bg);
-}
+  &::-webkit-scrollbar-thumb {
+    background-color: rgba(120, 120, 140, 0.44);
+    border-radius: var(--bew-radius-full);
+  }
 
-::-webkit-scrollbar-thumb {
-  background-color: rgba(120, 120, 140, 0.44);
-  border-radius: 20px;
-}
-
-::-webkit-scrollbar-corner {
-  background: transparent;
+  &::-webkit-scrollbar-corner {
+    background: transparent;
+  }
 }
 
 :host,
-:root {
+:root.bewly-design {
   scrollbar-width: thin;
   scrollbar-color: rgba(120, 120, 140, 0.44) transparent;
 }
 
 html.bewly-design,
 .bewly-design body {
-  // font-size: 14px !important;
-  min-width: unset !important;
   filter: none !important;
   color: var(--bew-text-1);
   background-image: none;
+}
+
+html.bewly-custom-homepage > body {
+  background-color: unset !important;
+  transition: opacity 0.5s;
+}
+
+html.bewly-design > ::-webkit-scrollbar-track {
+  background: var(--bew-bg);
 }
 
 .dark.bewly-design body,
@@ -67,7 +78,7 @@ html.dark.bewly-design {
 }
 
 // Adjust broken image icon
-img {
+.bewly-wrapper img:not(.pswp__img) {
   position: relative;
 
   &::before {
@@ -83,12 +94,52 @@ img {
 }
 
 .bewly-wrapper {
+  font-size: var(--bew-base-font-size);
   line-height: 1.4;
 
   * {
     text-rendering: optimizeLegibility;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
+  }
+
+  .bew-page-heading {
+    margin: 0;
+    font-size: var(--bew-font-size-heading);
+    font-weight: var(--bew-font-weight-bold);
+    line-height: var(--bew-line-height-heading);
+  }
+
+  .bew-section-heading {
+    font-size: var(--bew-font-size-heading);
+    font-weight: var(--bew-font-weight-medium);
+    line-height: var(--bew-line-height-heading);
+  }
+
+  .bew-card-title-text {
+    font-size: var(--bew-font-size-title);
+    line-height: var(--bew-line-height-title);
+  }
+
+  .bew-body-text {
+    font-size: var(--bew-font-size-body);
+    line-height: var(--bew-line-height-body);
+  }
+
+  // Baseline keyboard feedback for legacy/raw controls. Component-specific
+  // focus styles may refine this ring but must not remove it without replacement.
+  :where(
+    button,
+    a,
+    input,
+    select,
+    textarea,
+    [role="button"],
+    [role="tab"],
+    [tabindex]:not([tabindex="-1"])
+  ):focus-visible {
+    outline: 2px solid var(--bew-theme-color-40);
+    outline-offset: var(--bew-space-0-5);
   }
 
   .keep-one-line {
@@ -107,13 +158,112 @@ img {
     line-clamp: 2;
   }
 
+  .bew-content-card {
+    border-radius: var(--bew-card-radius);
+
+    @supports (corner-shape: superellipse(1.5)) {
+      border-radius: var(--bew-card-continuous-radius);
+      corner-shape: var(--bew-card-corner-shape);
+    }
+  }
+
+  .bew-top-bar-media-column {
+    width: var(--bew-top-bar-media-width);
+    flex: 0 0 auto;
+    align-self: flex-start;
+    overflow: hidden;
+    border-radius: var(--bew-top-bar-media-radius);
+
+    @supports (corner-shape: superellipse(1.5)) {
+      border-radius: var(--bew-top-bar-media-continuous-radius);
+      corner-shape: var(--bew-media-corner-shape);
+    }
+  }
+
+  .bew-top-bar-media-frame {
+    position: relative;
+    width: 100%;
+    aspect-ratio: var(--bew-top-bar-media-aspect-ratio);
+    flex: 0 0 auto;
+    align-self: flex-start;
+    overflow: hidden;
+    border-radius: var(--bew-top-bar-media-radius);
+
+    @supports (corner-shape: superellipse(1.5)) {
+      border-radius: var(--bew-top-bar-media-continuous-radius);
+      corner-shape: var(--bew-media-corner-shape);
+    }
+
+    > img {
+      display: block;
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+    }
+  }
+
+  .bew-top-bar-media-column--narrow,
+  .bew-top-bar-media-frame--narrow {
+    width: var(--bew-top-bar-media-width-narrow);
+  }
+
+  .bew-top-bar-media-frame--compact {
+    width: var(--bew-top-bar-media-width-compact);
+  }
+
+  .bew-top-bar-media-copy {
+    min-width: 0;
+    flex: 1 1 auto;
+    // 作者等次级文字继承的基准字号；标题自身使用 media-title 的独立字号
+    font-size: var(--bew-font-size-control);
+    line-height: var(--bew-line-height-control);
+  }
+
+  .bew-top-bar-media-title {
+    overflow: hidden;
+    display: -webkit-box;
+    line-break: anywhere;
+    font-size: var(--bew-top-bar-media-title-size);
+    line-height: var(--bew-top-bar-media-title-line-height);
+    font-weight: var(--bew-top-bar-media-title-weight);
+    text-overflow: ellipsis;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+  }
+
+  .bew-top-bar-media-author {
+    font-weight: var(--bew-top-bar-media-author-weight);
+  }
+
+  .bew-top-bar-media-author--compact {
+    overflow: hidden;
+    display: -webkit-box;
+    line-break: anywhere;
+    font-size: var(--bew-top-bar-media-meta-size);
+    line-height: var(--bew-top-bar-media-meta-line-height);
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+  }
+
+  .bew-top-bar-media-meta {
+    font-size: var(--bew-top-bar-media-meta-size);
+    font-weight: var(--bew-font-weight-regular);
+    line-height: var(--bew-top-bar-media-meta-line-height);
+  }
+
+  .bew-popover-inset {
+    padding: var(--bew-popover-padding);
+  }
+
   code {
     display: inline-block;
     background-color: var(--bew-fill-1);
     padding: 0 0.5em;
     margin: 0.14em 0.2em;
-    border-radius: 4px;
-    font-weight: 600;
+    border-radius: var(--bew-radius-sm);
+    font-weight: var(--bew-font-weight-semibold);
     line-height: 1.24;
   }
 
@@ -122,13 +272,16 @@ img {
     background-color: var(--bew-fill-1);
     padding: 0 0.5em;
     margin: 0.14em 0.2em;
-    border-radius: 4px;
+    border-radius: var(--bew-radius-sm);
     box-shadow:
       0 0 0 1px var(--bew-border-color),
       0 1.4px 0 0 var(--bew-fill-2);
     line-height: 1.24;
     cursor: pointer;
-    transition: 0.3s;
+    transition:
+      background-color 0.2s ease,
+      box-shadow 0.2s ease,
+      translate 0.2s ease;
 
     &:hover {
       background-color: var(--bew-fill-2);
@@ -152,5 +305,174 @@ img {
   }
 }
 
+// Keep the settings modal above body-level Teleports (for example, the
+// top-bar switcher) even though the modal itself lives inside this Shadow DOM.
+:host(.settings-open) {
+  position: relative;
+  z-index: var(--bew-z-settings-host);
+}
+
 // Note: View Transition styles for theme toggle are injected dynamically via JS in useDark.ts
 // because this file is loaded in Shadow DOM and cannot affect document-level ::view-transition pseudo-elements
+
+.bew-warning-text {
+  color: var(--bew-warning-color);
+}
+
+// Warning badges share one visual language across settings headings and items.
+.bew-warning-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: var(--bew-space-0-5) var(--bew-space-2);
+  color: var(--bew-warning-color);
+  background: color-mix(in oklab, var(--bew-warning-color), transparent 88%);
+  border-radius: var(--bew-badge-radius);
+  font-size: var(--bew-font-size-caption);
+  font-weight: var(--bew-font-weight-semibold);
+  line-height: var(--bew-line-height-caption);
+}
+
+// Shared surface for search suggestions, filters and other anchored Pop UI.
+.bew-popover-surface {
+  box-sizing: border-box;
+  color: var(--bew-text-1);
+  background: var(--bew-elevated);
+  border: 1px solid var(--bew-popover-border-color);
+  border-radius: var(--bew-popover-surface-radius);
+  box-shadow: var(--bew-shadow-2);
+  backdrop-filter: var(--bew-filter-glass-1);
+}
+
+.bew-popover-surface--wallpaper {
+  background: var(--bew-popover-wallpaper-background);
+}
+
+// 页面控件只在自身范围内采样背景；不再依赖工具栏背后的一整块底板。
+.bew-toolbar-controls .b-input,
+.bew-toolbar-controls .select-trigger,
+.bew-toolbar-controls .bew-toolbar-note {
+  color: var(--bew-text-1);
+  background: var(--bew-control-surface-background);
+  box-shadow: var(--bew-control-surface-edge);
+  backdrop-filter: var(--bew-control-surface-filter);
+  -webkit-backdrop-filter: var(--bew-control-surface-filter);
+}
+
+.bew-toolbar-controls .b-input:hover,
+.bew-toolbar-controls .select-trigger:hover:not(.is-disabled) {
+  background: var(--bew-control-surface-hover);
+}
+
+.bew-toolbar-controls .b-input:focus-within {
+  outline: 2px solid var(--bew-theme-color);
+  outline-offset: var(--bew-space-0-5);
+}
+
+.bew-toolbar-controls .b-button.b-button--type-secondary,
+.bew-toolbar-controls .b-button.b-button--type-tertiary {
+  --b-button-color: var(--bew-control-surface-background);
+  --b-button-color-hover: var(--bew-control-surface-hover);
+  --b-button-shadow: var(--bew-control-surface-edge);
+
+  backdrop-filter: var(--bew-control-surface-filter);
+  -webkit-backdrop-filter: var(--bew-control-surface-filter);
+}
+
+// 同一行的输入框、选择器和按钮使用相同外框高度，边框和 padding 都计入其中。
+.bew-toolbar-controls .b-input.b-input--medium,
+.bew-toolbar-controls .b-button.b-button--size-medium,
+.bew-toolbar-controls .select-trigger,
+.bew-toolbar-controls .bew-toolbar-note {
+  box-sizing: border-box;
+  height: var(--bew-control-height);
+  min-height: var(--bew-control-height);
+  padding-block: 0;
+  border-radius: var(--bew-interactive-radius);
+}
+
+.bew-toolbar-controls .b-input.b-input--medium input,
+.bew-toolbar-controls .select-trigger {
+  font-size: var(--bew-font-size-control);
+  line-height: var(--bew-line-height-control);
+}
+
+.bew-toolbar-controls .b-input.b-input--medium input {
+  box-sizing: border-box;
+  height: 100%;
+  padding: 0;
+  border: 0;
+}
+
+.bew-toolbar-controls .b-input input::placeholder {
+  color: var(--bew-control-surface-muted);
+  opacity: 1;
+}
+
+.bew-toolbar-controls .bew-toolbar-note {
+  display: inline-flex;
+  align-items: center;
+  padding-inline: var(--bew-space-3);
+}
+
+.bew-page-sidebar {
+  box-sizing: border-box;
+  border-radius: var(--bew-panel-radius);
+}
+
+.bew-page-sidebar .bew-page-nav-item {
+  display: flex;
+  align-items: center;
+  box-sizing: border-box;
+  width: 100%;
+  min-height: var(--bew-control-height);
+  padding: var(--bew-space-2) var(--bew-space-3);
+  border-radius: var(--bew-interactive-radius);
+  color: var(--bew-text-1);
+  background: transparent;
+  font-size: var(--bew-font-size-control);
+  font-weight: var(--bew-font-weight-medium);
+  line-height: var(--bew-line-height-control);
+  text-align: start;
+  cursor: pointer;
+  transition:
+    background-color var(--bew-duration-fast) var(--bew-ease-standard),
+    box-shadow var(--bew-duration-fast) var(--bew-ease-standard);
+
+  &:hover:not(:disabled):not([data-active="true"]) {
+    background: var(--bew-fill-2);
+  }
+
+  &:active:not(:disabled):not([data-active="true"]) {
+    background: var(--bew-fill-3);
+  }
+
+  &[data-active="true"] {
+    color: var(--bew-text-auto);
+    background: var(--bew-theme-color-auto);
+    box-shadow: var(--bew-shadow-2);
+  }
+
+  &:focus-visible {
+    outline: 2px solid var(--bew-theme-color-auto);
+    outline-offset: var(--bew-space-0-5);
+  }
+
+  &:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+  }
+}
+
+.bew-settings-option--lift {
+  cursor: pointer;
+  transition:
+    transform var(--bew-duration-normal) var(--bew-ease-standard),
+    filter var(--bew-duration-normal) var(--bew-ease-standard),
+    box-shadow var(--bew-duration-normal) var(--bew-ease-standard);
+
+  &:hover {
+    filter: brightness(1.08);
+    box-shadow: var(--bew-shadow-2);
+    transform: translateY(-2px);
+  }
+}

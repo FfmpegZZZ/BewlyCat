@@ -1,4 +1,7 @@
 <script setup lang="ts">
+import { computed } from 'vue'
+import { useI18n } from 'vue-i18n'
+
 export type LiveSubCategory = 'all' | 'live_room' | 'live_user'
 
 interface LiveSubCategoryOption {
@@ -14,11 +17,12 @@ const emit = defineEmits<{
   'update:subCategory': [value: LiveSubCategory]
 }>()
 
-const subCategories: LiveSubCategoryOption[] = [
-  { value: 'all', label: '全部' },
-  { value: 'live_room', label: '直播间' },
-  { value: 'live_user', label: '主播' },
-]
+const { t } = useI18n()
+const subCategories = computed<LiveSubCategoryOption[]>(() => [
+  { value: 'all', label: t('search.all') },
+  { value: 'live_room', label: t('search.live_rooms') },
+  { value: 'live_user', label: t('search.streamers') },
+])
 
 function handleSubCategoryChange(value: LiveSubCategory) {
   emit('update:subCategory', value)
@@ -35,8 +39,8 @@ function handleSubCategoryChange(value: LiveSubCategory) {
         class="sub-category-tab"
         :class="{ active: props.subCategory === category.value }"
         px-4 py-2 rounded="$bew-radius-half"
-        transition-all
-        duration-200 hover:bg="$bew-fill-1"
+        transition-colors duration-200
+        hover:bg="$bew-fill-1"
         type="button"
         @click="handleSubCategoryChange(category.value)"
       >

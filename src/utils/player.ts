@@ -1,8 +1,12 @@
 // 更完善的播放器元素选择器
+import { MOMENTS_VIDEO_DIALOG_IFRAME_NAME } from '~/constants/globalEvents'
 import { settings } from '~/logic'
-import type { AutoPlayMode, DefaultVideoPlayerMode } from '~/logic/storage'
+import type { AutoPlayMode, DefaultVideoPlayerMode, VideoPlayerModeContext, VideoPlayerModeOverride } from '~/logic/storage'
+import { i18n } from '~/utils/i18n'
 
-import { applyVolumeNormalization } from './audioNormalization'
+function t(key: string, params: Record<string, unknown> = {}) {
+  return String(i18n.global.t(key, params))
+}
 
 const _videoClassTag = {
   danmuBtn:
@@ -18,7 +22,7 @@ const _videoClassTag = {
   title:
       '.video-title,.bilibili-player-video-top-title,#player-title,.season-info .title',
   subtitle:
-      '.video-pod__item.active>.title,.multip-list-item.multip-list-item-active',
+      '.video-pod__item.active>.title,.simple-base-item.active .title-txt,.multip-list-item.multip-list-item-active',
   widescreen:
       '.bpx-player-ctrl-wide,.bilibili-player-video-btn-widescreen,.squirtle-video-widescreen',
   pagefullscreen:
@@ -34,25 +38,93 @@ const _videoClassTag = {
   upLink: 'a[href*="space.bilibili.com"],.up-name[href*="space.bilibili.com"],.upinfo-btn-panel .name[href*="space.bilibili.com"]',
 }
 
+const monitoredDanmakuSwitches = new WeakSet<HTMLInputElement>()
+const monitoredCaptionControls = new WeakSet<HTMLElement>()
+const monitoredPlaybackRateVideos = new WeakSet<HTMLVideoElement>()
+const VIDEO_RETRY_MAX_ATTEMPTS = 30
+let applyRateRetryCount = 0
+let applyRateRetryTimer: number | undefined
+let rateMonitorRetryCount = 0
+let rateMonitorRetryTimer: number | undefined
+let autoExitRetryCount = 0
+let autoExitRetryTimer: number | undefined
+
+function monitorDanmakuState(danmakuSwitch: HTMLInputElement) {
+  if (monitoredDanmakuSwitches.has(danmakuSwitch))
+    return
+
+  monitoredDanmakuSwitches.add(danmakuSwitch)
+  danmakuSwitch.addEventListener('change', () => {
+    if (settings.value.defaultDanmakuState === 'remember')
+      saveDanmakuState(danmakuSwitch.checked)
+  })
+}
+
+function monitorCaptionState(closeSwitch: HTMLElement, languageItem: HTMLElement) {
+  if (!monitoredCaptionControls.has(closeSwitch)) {
+    monitoredCaptionControls.add(closeSwitch)
+    closeSwitch.addEventListener('click', () => {
+      if (settings.value.defaultCaptionState === 'remember')
+        saveCaptionState(false)
+    })
+  }
+
+  if (!monitoredCaptionControls.has(languageItem)) {
+    monitoredCaptionControls.add(languageItem)
+    languageItem.addEventListener('click', () => {
+      if (settings.value.defaultCaptionState === 'remember')
+        saveCaptionState(true)
+    })
+  }
+}
+
 // 重试任务类，用于处理重试逻辑
 export class RetryTask {
   private count = 0
-  private repeat: () => void
+  private timer: ReturnType<typeof setTimeout> | undefined
+  private finished = false
+  private stop = () => {
+    if (this.finished)
+      return
+    this.finished = true
+    clearTimeout(this.timer)
+    this.options.signal?.removeEventListener('abort', this.stop)
+    this.options.onFinished?.()
+  }
 
   constructor(
     private max: number,
     private timeout: number,
     private fn: () => boolean,
+    private options: { signal?: AbortSignal, onFinished?: () => void } = {},
   ) {
-    this.repeat = this.start.bind(this)
+    options.signal?.addEventListener('abort', this.stop, { once: true })
   }
 
   start() {
-    this.count++
-    if (this.count > this.max)
+    if (this.finished)
       return
-    if (!this.fn())
-      setTimeout(this.repeat, this.timeout)
+    if (this.options.signal?.aborted) {
+      this.stop()
+      return
+    }
+    this.count++
+    if (this.count > this.max) {
+      this.stop()
+      return
+    }
+    try {
+      if (this.fn() || this.count >= this.max) {
+        this.stop()
+        return
+      }
+    }
+    catch (error) {
+      this.stop()
+      throw error
+    }
+    if (!this.finished)
+      this.timer = setTimeout(() => this.start(), this.timeout)
   }
 }
 
@@ -90,6 +162,11 @@ export function isVideoPage() {
   return location.pathname.startsWith('/video/')
 }
 
+// 判断是否为稍后再看播放页
+export function isWatchLaterVideo(): boolean {
+  return location.pathname === '/list/watchlater' || location.pathname === '/list/watchlater/'
+}
+
 // 格式化时间
 export function formatTime(seconds: number): string {
   const minutes = Math.floor(seconds / 60)
@@ -119,9 +196,8 @@ export function showState(text: string) {
   }
 }
 
-// 应用播放器辅助功能（音量均衡、倍速记忆等）
+// 应用播放器辅助功能（倍速记忆等）
 function applyPlayerEnhancements() {
-  applyVolumeNormalization()
   applyRememberedPlaybackRate()
   startPlaybackRateMonitoring()
 }
@@ -130,7 +206,7 @@ export function fullscreen() {
   new RetryTask(20, 500, () => {
     const result = fullscreenClick()
     if (result) {
-      // 在成功进入全屏后应用音量均衡和倍速记忆
+      // 在成功进入全屏后应用倍速记忆
       setTimeout(() => {
         applyPlayerEnhancements()
       }, 1000)
@@ -139,30 +215,51 @@ export function fullscreen() {
   }).start()
 }
 
-export function webFullscreen() {
+export interface PlayerModeApplication {
+  shouldApply: () => boolean
+  onApplied: () => void
+  signal?: AbortSignal
+  onSettled?: () => void
+}
+
+function schedulePlayerModeEffect(effect: () => void, delay: number, signal?: AbortSignal) {
+  if (signal?.aborted)
+    return
+  let timer: ReturnType<typeof setTimeout>
+  const cancel = () => clearTimeout(timer)
+  timer = setTimeout(() => {
+    signal?.removeEventListener('abort', cancel)
+    if (!signal?.aborted)
+      effect()
+  }, delay)
+  signal?.addEventListener('abort', cancel, { once: true })
+}
+
+export function webFullscreen(application?: PlayerModeApplication) {
   new RetryTask(20, 500, () => {
+    if (application && !application.shouldApply())
+      return true
+
     // 检查是否已经处于网页全屏状态
     if (document.querySelector('[data-screen=\'web\']')) {
-      // 即使已经是网页全屏状态，也应用音量均衡和倍速记忆
-      setTimeout(() => {
-        applyPlayerEnhancements()
-      }, 1000)
+      application?.onApplied()
+      // 即使已经是网页全屏状态，也应用倍速记忆
+      schedulePlayerModeEffect(applyPlayerEnhancements, 1000, application?.signal)
       return true
     }
 
     const result = webFullscreenClick()
     if (result) {
-      // 在成功进入网页全屏后应用音量均衡和倍速记忆
-      setTimeout(() => {
-        applyPlayerEnhancements()
-      }, 1000)
+      application?.onApplied()
+      // 在成功进入网页全屏后应用倍速记忆
+      schedulePlayerModeEffect(applyPlayerEnhancements, 1000, application?.signal)
     }
     return result
-  }).start()
+  }, { signal: application?.signal, onFinished: application?.onSettled }).start()
 }
 
-// 将播放器滚动到合适位置，优先保证弹幕栏可见
-function scrollPlayerToOptimalPosition(delay = 1000) {
+// 将播放器滚动到设置的位置
+function scrollPlayerToOptimalPosition(delay = 1000, signal?: AbortSignal) {
   // 如果设置了不滚动，直接返回
   if (!settings.value.videoPlayerScroll)
     return
@@ -171,6 +268,15 @@ function scrollPlayerToOptimalPosition(delay = 1000) {
     const playerElement = document.querySelector(_videoClassTag.player)
     if (!playerElement)
       return
+
+    if (settings.value.videoPlayerScrollMode === 'playerCenter') {
+      const rect = playerElement.getBoundingClientRect()
+      window.scrollBy({
+        top: rect.top + rect.height / 2 - window.innerHeight / 2,
+        behavior: 'smooth',
+      })
+      return
+    }
 
     // 查找弹幕发送栏
     const sendingBar = document.querySelector('.bpx-player-sending-bar')
@@ -192,35 +298,36 @@ function scrollPlayerToOptimalPosition(delay = 1000) {
   }
 
   if (delay > 0) {
-    setTimeout(scroll, delay)
+    schedulePlayerModeEffect(scroll, delay, signal)
   }
   else {
     scroll()
   }
 }
 
-export function widescreen() {
+export function widescreen(application?: PlayerModeApplication) {
   new RetryTask(20, 500, () => {
+    if (application && !application.shouldApply())
+      return true
+
     // 检查是否已经处于宽屏状态
     if (document.querySelector('[data-screen=\'wide\']')) {
-      // 即使已经是宽屏状态，也执行滚动、音量均衡和倍速记忆
-      scrollPlayerToOptimalPosition()
-      setTimeout(() => {
-        applyPlayerEnhancements()
-      }, 1000)
+      application?.onApplied()
+      // 即使已经是宽屏状态，也执行滚动和倍速记忆
+      scrollPlayerToOptimalPosition(1000, application?.signal)
+      schedulePlayerModeEffect(applyPlayerEnhancements, 1000, application?.signal)
       return true
     }
 
     const result = widescreenClick()
     if (result) {
-      scrollPlayerToOptimalPosition()
-      // 在成功进入宽屏后应用音量均衡和倍速记忆
-      setTimeout(() => {
-        applyPlayerEnhancements()
-      }, 1000)
+      application?.onApplied()
+      scrollPlayerToOptimalPosition(1000, application?.signal)
+      // 在成功进入宽屏后应用倍速记忆
+      schedulePlayerModeEffect(applyPlayerEnhancements, 1000, application?.signal)
     }
     return result
-  }).start()
+  }, { signal: application?.signal, onFinished: application?.onSettled }).start()
 }
 
 export function widescreenClick() {
@@ -250,13 +357,17 @@ export function webFullscreenClick() {
   return false
 }
 
-// 默认模式下也执行滚动、音量均衡和倍速记忆
-export function defaultMode() {
-  scrollPlayerToOptimalPosition()
-  // 在默认模式下也应用音量均衡和倍速记忆
-  setTimeout(() => {
-    applyPlayerEnhancements()
-  }, 2000) // 默认模式延迟稍长一些，确保页面完全加载
+// 默认模式下也执行滚动和倍速记忆
+export function defaultMode(application?: PlayerModeApplication) {
+  if (application && !application.shouldApply()) {
+    application.onSettled?.()
+    return false
+  }
+  scrollPlayerToOptimalPosition(1000, application?.signal)
+  // 在默认模式下也应用倍速记忆
+  schedulePlayerModeEffect(applyPlayerEnhancements, 2000, application?.signal)
+  application?.onApplied()
+  application?.onSettled?.()
   return true
 }
 
@@ -266,12 +377,15 @@ export function applyDefaultDanmakuState() {
   if (!preference || preference === 'system')
     return
 
-  const shouldEnable = preference === 'on'
+  const isRemember = preference === 'remember'
+  const shouldEnable = isRemember ? settings.value.lastDanmakuState : preference === 'on'
 
   new RetryTask(20, 500, () => {
     const danmuSwitch = document.querySelector(_videoClassTag.danmuBtn) as HTMLInputElement | null
     if (!danmuSwitch)
       return false
+
+    monitorDanmakuState(danmuSwitch)
 
     if (danmuSwitch.checked === shouldEnable)
       return true
@@ -307,6 +421,8 @@ export function applyDefaultCaptionState() {
     const languageItem = document.querySelector<HTMLElement>('.bpx-player-ctrl-subtitle-language-item')
 
     if (closeSwitch && languageItem) {
+      monitorCaptionState(closeSwitch, languageItem)
+
       const isCurrentlyOn = !closeSwitch.classList.contains('bpx-state-active')
       if (isCurrentlyOn === shouldEnable)
         return true
@@ -321,12 +437,14 @@ export function applyDefaultCaptionState() {
 
     return false
   }).start()
-
-  if (isRemember)
-    saveCaptionState(shouldEnable)
 }
 
-// 保存字幕状态，供"记住上次状态"使用
+// 保存弹幕状态，供“记住上次状态”使用
+export function saveDanmakuState(enabled: boolean) {
+  settings.value.lastDanmakuState = enabled
+}
+
+// 保存字幕状态，供“记住上次状态”使用
 export function saveCaptionState(enabled: boolean) {
   settings.value.lastCaptionState = enabled
 }
@@ -334,7 +452,7 @@ export function saveCaptionState(enabled: boolean) {
 // 检测是否为合集视频
 export function isCollectionVideo(): boolean {
   // 检测多P视频选集
-  if (document.querySelector('.video-pod__item, .multi-page__item, .page-item')) {
+  if (document.querySelector('.video-pod__item, .video-pod__list .simple-base-item, .multi-page__item, .page-item')) {
     return true
   }
 
@@ -361,7 +479,7 @@ function isLoopEnabled(): boolean {
   return loopCheckbox?.checked === true
 }
 
-// 收藏列表/稍后再看等场景使用播放设置中的 handoff 单选项控制自动切集
+// 播放列表场景使用“更多播放设置”中的 handoff 单选项控制自动切集
 function isPlaylistHandoffEnabled(): boolean {
   const autoHandoffRadio = document.querySelector(
     '.bpx-player-ctrl-setting-handoff input[type=radio][value="0"]',
@@ -384,51 +502,56 @@ export enum VideoType {
   MULTIPART = 'multipart', // 分P视频
   COLLECTION = 'collection', // 合集视频
   RECOMMEND = 'recommend', // 单视频推荐
+  WATCH_LATER = 'watchLater', // 稍后再看
   PLAYLIST = 'playlist', // 收藏列表
 }
 
 // 检测当前视频类型
 export function detectVideoType(): VideoType {
+  if (isWatchLaterVideo())
+    return VideoType.WATCH_LATER
+
   // 检测是否为收藏列表
-  if (/https?:\/\/(?:www\.)?bilibili\.com\/list\//.test(location.href)) {
+  if (
+    location.pathname.startsWith('/list/')
+    || location.pathname === '/medialist/play'
+    || location.pathname.startsWith('/medialist/play/')
+  ) {
     return VideoType.PLAYLIST
   }
 
-  // 检测多P视频和合集视频的关键区别：
-  // 分P视频有 .view-mode 切换视图组件，合集视频没有
-  const hasViewMode = !!document.querySelector('.view-mode')
-  const hasVideoPod = !!document.querySelector('.video-pod__item, .multi-page__item, .page-item')
+  // 优先根据当前稿件的分 P 数判断。合集可以包含多 P 稿件，
+  // 如果先根据右侧合集列表判断，这类稿件会错用合集的播放设置。
+  const app = document.querySelector('#app') as (Element & {
+    __vue__?: {
+      isSection?: boolean
+      videoData?: { videos?: number, pages?: unknown[] }
+    }
+  }) | null
+  const videoData = app?.__vue__?.videoData
+  const videosCount = videoData?.pages?.length || videoData?.videos
+  if (videosCount && videosCount > 1)
+    return VideoType.MULTIPART
 
-  if (hasVideoPod) {
-    // 有视频列表项
-    if (hasViewMode) {
-      // 有切换视图组件 = 分P视频
-      return VideoType.MULTIPART
-    }
-    else {
-      // 没有切换视图组件 = 合集视频
-      return VideoType.COLLECTION
-    }
+  // 内容脚本未必能读取页面的 Vue 实例，仍需 DOM 兜底。
+  // video-pod__item 可以包着 simple-base-item，两者都是合集的同一条目，
+  // 不能用它们同时存在来证明当前稿件有多个分 P。
+  // 只接受分 P 专属列表或选集容器内的视图切换；已知单 P 时不再推测。
+  if (videosCount !== 1 && document.querySelector([
+    '.multi-page .cur-list li',
+    '.multi-page-v1 .cur-list li',
+    '.multi-page .multi-page__item',
+    '.multi-page .page-item',
+    '.video-pod .multip-list-item',
+    '.video-pod .view-mode',
+    '.multi-page .view-mode',
+    '.multi-page-v1 .view-mode',
+  ].join(', '))) {
+    return VideoType.MULTIPART
   }
 
-  // 尝试从页面中获取视频数据（备用方案）
-  const app = document.querySelector('#app') as any
-  if (app?.__vue__) {
-    const videoData = app.__vue__.videoData
-    if (videoData) {
-      const { videos: videosCount } = videoData
-      const isSection = app.__vue__.isSection
-
-      // 分P视频：videos > 1
-      if (videosCount > 1) {
-        return VideoType.MULTIPART
-      }
-      // 合集视频：isSection = true
-      if (isSection) {
-        return VideoType.COLLECTION
-      }
-    }
-  }
+  if (app?.__vue__?.isSection)
+    return VideoType.COLLECTION
 
   // 如果以上都不是，检测是否为合集视频（通过DOM）
   if (isCollectionVideo()) {
@@ -439,6 +562,63 @@ export function detectVideoType(): VideoType {
   return VideoType.RECOMMEND
 }
 
+export function detectVideoPlayerModeContext(): VideoPlayerModeContext | null {
+  if (isWatchLaterVideo())
+    return 'watchLater'
+
+  if (location.pathname.startsWith('/bangumi/play/'))
+    return 'bangumi'
+
+  switch (detectVideoType()) {
+    case VideoType.MULTIPART:
+      return 'multipart'
+    case VideoType.COLLECTION:
+      return 'collection'
+    case VideoType.PLAYLIST:
+      return 'playlist'
+    default:
+      return null
+  }
+}
+
+function isVideoPlayerModeOverride(value: unknown): value is VideoPlayerModeOverride {
+  return value === 'inherit'
+    || value === 'default'
+    || value === 'webFullscreen'
+    || value === 'widescreen'
+    || value === 'bewlyWidescreen'
+}
+
+/** 动态视频弹窗的显示模式覆盖；未启用覆盖或选择继承时返回 null，交由视频所属场景决定。 */
+export function resolveMomentsDialogPlayerModeOverride(): DefaultVideoPlayerMode | null {
+  if (!settings.value.enableVideoPlayerModeOverrides)
+    return null
+
+  const override = settings.value.videoPlayerModeOverrides?.momentsDialog
+  return isVideoPlayerModeOverride(override) && override !== 'inherit' ? override : null
+}
+
+export function resolveDefaultVideoPlayerMode(): DefaultVideoPlayerMode {
+  if (!settings.value.enableVideoPlayerModeOverrides)
+    return settings.value.defaultVideoPlayerMode
+
+  if (window.name === MOMENTS_VIDEO_DIALOG_IFRAME_NAME) {
+    const dialogMode = resolveMomentsDialogPlayerModeOverride()
+    if (dialogMode)
+      return dialogMode
+  }
+
+  const context = detectVideoPlayerModeContext()
+  if (!context)
+    return settings.value.defaultVideoPlayerMode
+
+  const override = settings.value.videoPlayerModeOverrides?.[context]
+  if (!isVideoPlayerModeOverride(override) || override === 'inherit')
+    return settings.value.defaultVideoPlayerMode
+
+  return override
+}
+
 // 查找自动播放开关按钮（支持多种 DOM 结构）
 function findAutoPlaySwitchButton(): { button: HTMLElement, isOn: boolean } | null {
   // 尝试多种可能的选择器
@@ -447,21 +627,17 @@ function findAutoPlaySwitchButton(): { button: HTMLElement, isOn: boolean } | nu
     { container: '.auto-play', switchOn: '.switch-btn.on', switchOff: '.switch-btn:not(.on)' },
     // 旧版 B站
     { container: '.continuous-btn', switchOn: '.switch-btn.on', switchOff: '.switch-btn:not(.on)' },
-    // 备用：直接查找开关
-    { container: null, switchOn: '.switch-btn.on', switchOff: '.switch-btn:not(.on)' },
   ]
 
   for (const selector of selectors) {
     let searchRoot: Element | Document = document
 
     // 如果指定了容器，先查找容器
-    if (selector.container) {
-      const container = document.querySelector(selector.container)
-      if (!container) {
-        continue
-      }
-      searchRoot = container
+    const container = document.querySelector(selector.container)
+    if (!container) {
+      continue
     }
+    searchRoot = container
 
     // 在容器内查找开关按钮
     const switchOnBtn = searchRoot.querySelector(selector.switchOn) as HTMLElement
@@ -552,13 +728,16 @@ function setAutoPlayState(enable: boolean) {
           isProgrammaticChange = false
         }, 0)
       }
+
+      // B 站会异步重绘开关，确认实际状态后再结束重试。
+      return findAutoPlaySwitchButton()?.isOn === enable
     }
 
     return true
   }).start()
 }
 
-// 设置收藏列表的播放方式（自动切集或播完暂停）
+// 设置播放器官方 handoff 模式（自动切集或播完暂停）
 function setPlaylistHandoffMode(enable: boolean) {
   // 如果启用自动切集，需要先关闭单集循环（单集循环优先级更高）
   if (enable) {
@@ -576,61 +755,217 @@ function setPlaylistHandoffMode(enable: boolean) {
       return false
     }
 
-    // 如果目标按钮未选中，则设置为选中
+    // 优先走原生 click，让 B 站播放器自己的事件处理器更新配置与 UI。
+    // 直接改 checked 在 React/Vue 控制的 input 上可能只改到 DOM，切集后就会丢失。
     if (!targetRadio.checked) {
-      targetRadio.checked = true
-      targetRadio.dispatchEvent(new Event('change', { bubbles: true }))
+      targetRadio.click()
+
+      // 个别播放器版本会阻止隐藏 radio 的 click，保留原生 setter 兜底。
+      if (!targetRadio.checked) {
+        const checkedSetter = Object.getOwnPropertyDescriptor(
+          HTMLInputElement.prototype,
+          'checked',
+        )?.set
+        checkedSetter?.call(targetRadio, true)
+        targetRadio.dispatchEvent(new Event('input', { bubbles: true }))
+        targetRadio.dispatchEvent(new Event('change', { bubbles: true }))
+      }
     }
 
     return targetRadio.checked
   }).start()
 }
 
+export function supportsCustomPlaybackForVideoType(videoType = detectVideoType()): boolean {
+  return videoType !== VideoType.RECOMMEND
+}
+
+function usesPlaylistHandoff(videoType: VideoType): boolean {
+  // 分 P 与合集也有播放器“更多播放设置 → 自动切集”。相比侧栏的旧
+  // .auto-play 开关，这个原生 handoff 配置会随播放器切集稳定保留。
+  return videoType === VideoType.MULTIPART
+    || videoType === VideoType.COLLECTION
+    || videoType === VideoType.WATCH_LATER
+    || videoType === VideoType.PLAYLIST
+}
+
+interface NativeEndPlaybackSnapshot {
+  videoType: VideoType
+  autoPlay: boolean | null
+  loop: boolean | null
+  playlistHandoff: boolean | null
+}
+
+let nativeEndPlaybackSnapshot: NativeEndPlaybackSnapshot | null = null
+let customEndPlaybackHandlerActive = false
+
+export function setCustomEndPlaybackHandlerActive(active: boolean): void {
+  customEndPlaybackHandlerActive = active
+}
+
+function captureNativeEndPlaybackBehavior(videoType: VideoType): void {
+  if (nativeEndPlaybackSnapshot?.videoType === videoType)
+    return
+
+  const loopCheckbox = document.querySelector<HTMLInputElement>(
+    '.bpx-player-ctrl-setting-loop input[type=checkbox]',
+  )
+  const handoffRadio = document.querySelector<HTMLInputElement>(
+    '.bpx-player-ctrl-setting-handoff input[type=radio][value="0"]',
+  )
+  nativeEndPlaybackSnapshot = {
+    videoType,
+    autoPlay: findAutoPlaySwitchButton()?.isOn ?? null,
+    loop: loopCheckbox?.checked ?? null,
+    playlistHandoff: handoffRadio?.checked ?? null,
+  }
+}
+
+function restoreNativeEndPlaybackBehavior(): void {
+  const snapshot = nativeEndPlaybackSnapshot
+  nativeEndPlaybackSnapshot = null
+  if (!snapshot)
+    return
+
+  if (snapshot.loop !== null)
+    setLoopState(snapshot.loop)
+
+  if (usesPlaylistHandoff(snapshot.videoType) && snapshot.playlistHandoff !== null)
+    setPlaylistHandoffMode(snapshot.playlistHandoff)
+
+  if (snapshot.autoPlay !== null)
+    setAutoPlayState(snapshot.autoPlay)
+}
+
+export function getAutoPlayModeForVideoType(videoType = detectVideoType()): AutoPlayMode {
+  switch (videoType) {
+    case VideoType.MULTIPART:
+      return settings.value.autoPlayMultipart
+    case VideoType.COLLECTION:
+      return settings.value.autoPlayCollection
+    case VideoType.RECOMMEND:
+      return settings.value.autoPlayRecommend
+    case VideoType.WATCH_LATER:
+      return settings.value.autoPlayWatchLater
+    case VideoType.PLAYLIST:
+      return settings.value.autoPlayPlaylist
+    default:
+      return 'default'
+  }
+}
+
+/** 当前结束行为是否允许自定义播放接管切集。播完暂停/单集循环仍走默认播放模式。 */
+export function doesEndBehaviorAllowCustomAdvance(videoType = detectVideoType()): boolean {
+  if (settings.value.useBilibiliDefaultAutoPlay)
+    return true
+
+  const mode = getAutoPlayModeForVideoType(videoType)
+  return mode === 'autoPlay' || mode === 'autoPlayWithRecommend' || mode === 'default'
+}
+
+/** 播放器是否正在展示贴片广告。广告屏蔽插件跳过广告时不应被当成正片结束。 */
+export function isPlayerShowingAdvertisement(): boolean {
+  const player = document.querySelector(_videoClassTag.player)
+  if (player instanceof HTMLElement) {
+    if (player.classList.contains('bpx-state-ad') || player.getAttribute('data-ad') === 'true')
+      return true
+  }
+
+  return !!document.querySelector([
+    '.bpx-player-ads',
+    '.bilibili-player-ads',
+    '.bpx-player-ad-wrap',
+    '.bpx-player-adwrap',
+    '.bpx-player-pic-ad',
+    '.bpx-player-ads-wrap',
+    '.bpx-player-ads-skip',
+    '.bpx-player-btn-skip',
+  ].join(','))
+}
+
+const PLAYER_ENDING_PANEL_SELECTOR = [
+  '.bpx-player-ending-wrap',
+  '.bilibili-player-ending-panel',
+].join(',')
+
+export function isPlayerEndingPanelVisible(): boolean {
+  return Array.from(document.querySelectorAll<HTMLElement>(PLAYER_ENDING_PANEL_SELECTOR)).some((panel) => {
+    if (panel.classList.contains('bpx-state-hidden') || !panel.getClientRects().length)
+      return false
+    const style = getComputedStyle(panel)
+    return style.display !== 'none' && style.visibility !== 'hidden' && style.visibility !== 'collapse'
+  })
+}
+
+/** 播放器是否停在播完推荐页。此时不要再点全屏或搬宽屏，否则会把推荐页打回最后一帧。 */
+export function isPlayerShowingEndingRecommendation(): boolean {
+  if (isPlayerShowingAdvertisement())
+    return false
+
+  if (isPlayerEndingPanelVisible())
+    return true
+
+  return !!getVideoElement()?.ended
+}
+
+/** 关闭 B 站原生的续播行为，让自定义播放独占视频结束后的切集。 */
+export function disableNativeEndPlaybackBehavior(videoType = detectVideoType()): void {
+  captureNativeEndPlaybackBehavior(videoType)
+  setLoopState(false)
+  if (usesPlaylistHandoff(videoType))
+    setPlaylistHandoffMode(false)
+  setAutoPlayState(false)
+}
+
 // 根据视频类型和设置应用自动连播状态
 export function applyAutoPlayByVideoType() {
-  // 如果启用了B站默认自动播放行为，不进行任何操作
-  if (settings.value.useBilibiliDefaultAutoPlay) {
+  const videoType = detectVideoType()
+
+  // 自定义顺序/逆序/随机播放独占 ended 事件；播放器重建后继续关闭原生续播，
+  // 避免官方逻辑与扩展同时抢着切下一集。播完暂停/单集循环仍交给默认播放模式。
+  if (customEndPlaybackHandlerActive && doesEndBehaviorAllowCustomAdvance(videoType)) {
+    disableNativeEndPlaybackBehavior(videoType)
     return
   }
+
+  // 使用 B 站默认行为时，撤销自定义播放对原生开关的临时接管。
+  if (settings.value.useBilibiliDefaultAutoPlay) {
+    restoreNativeEndPlaybackBehavior()
+    return
+  }
+
+  const mode = getAutoPlayModeForVideoType(videoType)
+
+  nativeEndPlaybackSnapshot = null
 
   // 如果用户手动修改过自动播放状态,跳过自动应用
   if (userManuallyChangedAutoPlay) {
     return
   }
 
-  const videoType = detectVideoType()
-  let mode: AutoPlayMode = 'default'
-
-  // 根据视频类型获取对应的设置
-  switch (videoType) {
-    case VideoType.MULTIPART:
-      mode = settings.value.autoPlayMultipart
-      break
-    case VideoType.COLLECTION:
-      mode = settings.value.autoPlayCollection
-      break
-    case VideoType.RECOMMEND:
-      mode = settings.value.autoPlayRecommend
-      break
-    case VideoType.PLAYLIST:
-      mode = settings.value.autoPlayPlaylist
-      break
-  }
-
-  // 收藏列表使用特殊的播放方式控制（自动切集/播完暂停）
-  if (videoType === VideoType.PLAYLIST) {
+  // 分 P、合集、收藏列表和稍后再看优先使用播放器官方“自动切集”。
+  if (usesPlaylistHandoff(videoType)) {
     switch (mode) {
       case 'autoPlay':
         // 开启自动切集
         setPlaylistHandoffMode(true)
         break
+      case 'autoPlayWithRecommend':
+        // 官方自动切集负责列表内续播，侧栏自动连播负责列表结束后的推荐。
+        setPlaylistHandoffMode(true)
+        setAutoPlayState(true)
+        break
       case 'pauseAtEnd':
         // 开启播完暂停
         setPlaylistHandoffMode(false)
+        setAutoPlayState(false)
         break
       case 'loop':
-        // 收藏列表不支持单集循环，使用播完暂停代替
         setPlaylistHandoffMode(false)
+        setAutoPlayState(false)
+        // 收藏列表/稍后再看沿用原行为；普通分 P 与合集使用播放器单集循环。
+        if (videoType === VideoType.MULTIPART || videoType === VideoType.COLLECTION)
+          setLoopState(true)
         break
     }
     return
@@ -756,7 +1091,7 @@ export function toggleMute(player: Element) {
     if (video) {
       const volumeNumber = document.querySelector('.bpx-player-ctrl-volume-number')
       const isMuted = volumeNumber ? volumeNumber.textContent === '0' : video.muted
-      showState(isMuted ? '已静音' : '已取消静音')
+      showState(isMuted ? t('player_state.muted') : t('player_state.unmuted'))
     }
   }
 }
@@ -856,7 +1191,7 @@ export function toggleCaption() {
   }
 
   // 如果没有找到任何字幕相关元素，显示提示
-  showState('当前视频无字幕')
+  showState(t('player_state.no_captions'))
 }
 
 // 改变播放速度
@@ -879,7 +1214,7 @@ export function changePlaybackRate(increase: boolean) {
     }
   }
 
-  showState(`倍速 ${video.playbackRate}`)
+  showState(t('player_state.speed', { rate: video.playbackRate }))
 }
 
 // 重置播放速度
@@ -887,52 +1222,86 @@ export function resetPlaybackRate() {
   const video = getVideoElement()
   if (video) {
     video.playbackRate = 1
-    showState('倍速 1')
+    showState(t('player_state.speed', { rate: 1 }))
   }
 }
 
 // 应用记住的倍速
 export function applyRememberedPlaybackRate() {
+  if (applyRateRetryTimer !== undefined)
+    window.clearTimeout(applyRateRetryTimer)
+  applyRateRetryTimer = undefined
+  applyRateRetryCount = 0
+  tryApplyRememberedPlaybackRate()
+}
+
+function tryApplyRememberedPlaybackRate() {
   if (!settings.value.rememberPlaybackRate) {
+    applyRateRetryCount = 0
     return
   }
 
   const video = getVideoElement()
   if (!video) {
-    // 如果视频元素还没有加载，延迟重试
-    setTimeout(() => applyRememberedPlaybackRate(), 1000)
+    if (applyRateRetryCount >= VIDEO_RETRY_MAX_ATTEMPTS)
+      return
+    applyRateRetryCount++
+    applyRateRetryTimer = window.setTimeout(() => {
+      applyRateRetryTimer = undefined
+      tryApplyRememberedPlaybackRate()
+    }, 1000)
     return
   }
+  applyRateRetryCount = 0
 
   // 确保倍速值在有效范围内
   const savedRate = settings.value.savedPlaybackRate
   if (savedRate >= 0.25 && savedRate <= 5) {
+    // B 站站内切换推荐视频时会复用 video 元素并重新加载媒体资源。
+    // 媒体加载会将 playbackRate 恢复为 defaultPlaybackRate，因此两者都要同步。
+    video.defaultPlaybackRate = savedRate
     video.playbackRate = savedRate
     // 只在倍速不是1时显示状态
     if (savedRate !== 1) {
-      showState(`倍速 ${savedRate}`)
+      showState(t('player_state.speed', { rate: savedRate }))
     }
   }
 }
 
 // 监听播放器倍速变化并记录（监听所有倍速变化，包括播放器UI操作）
 export function startPlaybackRateMonitoring() {
+  if (rateMonitorRetryTimer !== undefined)
+    window.clearTimeout(rateMonitorRetryTimer)
+  rateMonitorRetryTimer = undefined
+  rateMonitorRetryCount = 0
+  tryStartPlaybackRateMonitoring()
+}
+
+function tryStartPlaybackRateMonitoring() {
   if (!settings.value.rememberPlaybackRate) {
+    rateMonitorRetryCount = 0
     return
   }
 
   const video = getVideoElement()
   if (!video) {
-    // 如果视频元素还没有加载，延迟重试
-    setTimeout(() => startPlaybackRateMonitoring(), 1000)
+    if (rateMonitorRetryCount >= VIDEO_RETRY_MAX_ATTEMPTS)
+      return
+    rateMonitorRetryCount++
+    rateMonitorRetryTimer = window.setTimeout(() => {
+      rateMonitorRetryTimer = undefined
+      tryStartPlaybackRateMonitoring()
+    }, 1000)
     return
   }
+  rateMonitorRetryCount = 0
 
-  // 避免重复添加监听器
-  if (video.hasAttribute('bewly-rate-listener')) {
+  // DOM 属性可能在 B 站重建播放器时被复制到新节点，但事件监听器不会被复制。
+  // 使用 WeakSet 按真实节点去重，确保新 video 仍会安装监听器。
+  if (monitoredPlaybackRateVideos.has(video)) {
     return
   }
-  video.setAttribute('bewly-rate-listener', 'true')
+  monitoredPlaybackRateVideos.add(video)
 
   // 监听倍速变化事件，这会捕获所有倍速变化（包括UI操作）
   video.addEventListener('ratechange', () => {
@@ -941,8 +1310,25 @@ export function startPlaybackRateMonitoring() {
       // 确保倍速值在有效范围内
       if (currentRate >= 0.25 && currentRate <= 5) {
         settings.value.savedPlaybackRate = currentRate
+        // 让同一个 video 加载下一条推荐视频时沿用当前倍速，而不是回落到 1。
+        if (video.defaultPlaybackRate !== currentRate)
+          video.defaultPlaybackRate = currentRate
       }
     }
+  })
+
+  // 部分播放器更新会替换媒体资源但保留 video 节点；元数据就绪后再同步一次，
+  // 覆盖播放器初始化期间对 playbackRate 的重设。
+  video.addEventListener('loadedmetadata', () => {
+    if (!settings.value.rememberPlaybackRate)
+      return
+
+    const savedRate = settings.value.savedPlaybackRate
+    if (savedRate < 0.25 || savedRate > 5)
+      return
+
+    video.defaultPlaybackRate = savedRate
+    video.playbackRate = savedRate
   })
 }
 
@@ -987,7 +1373,7 @@ export function adjustVideoSize(direction: number) {
 export function showDanmuState() {
   const danmuBtn = document.querySelector(_videoClassTag.danmuBtn)
   if (danmuBtn) {
-    showState(`弹幕 ${(danmuBtn as HTMLInputElement).checked ? 'On' : 'Off'}`)
+    showState(t('player_state.danmaku', { state: (danmuBtn as HTMLInputElement).checked ? t('player_state.on') : t('player_state.off') }))
   }
 }
 
@@ -1120,7 +1506,10 @@ export function showClockTime(firstShow = false) {
     }
   }
   else {
-    clockInterval = null
+    if (clockInterval) {
+      clearInterval(clockInterval)
+      clockInterval = null
+    }
     if (clockElement) {
       clockElement.style.display = 'none'
     }
@@ -1269,7 +1658,7 @@ export function setVolume(volume: number, showStatus = false): boolean {
 
   // 根据参数决定是否显示音量状态
   if (showStatus) {
-    showState(`音量 ${clampedVolume}%`)
+    showState(t('player_state.volume', { volume: clampedVolume }))
   }
 
   return true
@@ -1376,12 +1765,26 @@ function checkAndCancelAutoPlayForRecommendation() {
 
 // 监听视频结束事件并自动退出全屏
 export function startAutoExitFullscreenMonitoring() {
+  if (autoExitRetryTimer !== undefined)
+    window.clearTimeout(autoExitRetryTimer)
+  autoExitRetryTimer = undefined
+  autoExitRetryCount = 0
+  tryStartAutoExitFullscreenMonitoring()
+}
+
+function tryStartAutoExitFullscreenMonitoring() {
   const video = getVideoElement()
   if (!video) {
-    // 如果视频元素还没有加载，延迟重试
-    setTimeout(() => startAutoExitFullscreenMonitoring(), 1000)
+    if (autoExitRetryCount >= VIDEO_RETRY_MAX_ATTEMPTS)
+      return
+    autoExitRetryCount++
+    autoExitRetryTimer = window.setTimeout(() => {
+      autoExitRetryTimer = undefined
+      tryStartAutoExitFullscreenMonitoring()
+    }, 1000)
     return
   }
+  autoExitRetryCount = 0
 
   // 避免重复添加监听器
   if (video.hasAttribute('bewly-auto-exit-listener')) {

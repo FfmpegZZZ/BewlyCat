@@ -71,7 +71,7 @@ function resetDockContent() {
       page: e.page,
       visible: true,
       openInNewTab: false,
-      useOriginalBiliPage: !e.hasBewlyPage,
+      useOriginalBiliPage: e.useOriginalBiliPage,
     }
   })
 }
@@ -83,16 +83,30 @@ function handleToggleDockItem(dockItem: any) {
   else
     dockItem.visible = true
 }
+
+function updateDockItemPageMode(dockItem: DockItem, useOriginalBiliPage: boolean) {
+  dockItem.useOriginalBiliPage = useOriginalBiliPage
+}
 </script>
 
 <template>
   <div>
     <SettingsItemGroup :title="$t('settings.group_dock')">
+      <SettingsItem :title="$t('settings.show_layout_edit_button')" :desc="$t('settings.show_layout_edit_button_desc')" right-width="auto">
+        <Radio v-model="settings.showLayoutEditButton" />
+      </SettingsItem>
       <SettingsItem :title="$t('settings.always_use_dock')" :desc="$t('settings.always_use_dock_desc')" right-width="auto">
         <Radio v-model="settings.alwaysUseDock" />
       </SettingsItem>
       <SettingsItem :title="$t('settings.auto_hide_dock')" right-width="auto">
         <Radio v-model="settings.autoHideDock" />
+      </SettingsItem>
+      <SettingsItem
+        v-if="settings.autoHideDock"
+        :title="$t('settings.always_show_dock_actions_when_auto_hide')"
+        right-width="auto"
+      >
+        <Radio v-model="settings.alwaysShowDockActionsWhenAutoHide" />
       </SettingsItem>
       <SettingsItem :title="$t('settings.half_hide_dock')" right-width="auto">
         <Radio v-model="settings.halfHideDock" />
@@ -104,7 +118,10 @@ function handleToggleDockItem(dockItem: any) {
           w="160px"
         />
       </SettingsItem>
-      <SettingsItem :desc="$t('settings.dock_content_adjustment_desc')">
+      <SettingsItem
+        :title="$t('settings.dock_content_adjustment')"
+        :desc="$t('settings.dock_content_adjustment_desc')"
+      >
         <template #title>
           <div flex="~ gap-4 items-center">
             {{ $t('settings.dock_content_adjustment') }}
@@ -125,6 +142,8 @@ function handleToggleDockItem(dockItem: any) {
           >
             <template #item="{ element }">
               <div
+                class="bew-settings-option--lift"
+                :data-settings-title="pageOptions.find(option => option.value === element.page)?.label"
                 flex="~ gap-2 justify-between items-center wrap" p="x-4 y-2" bg="$bew-fill-1" rounded="$bew-radius" cursor-all-scroll
                 duration-300
                 :style="{
@@ -139,12 +158,15 @@ function handleToggleDockItem(dockItem: any) {
                     {{ pageOptions.find(option => option.value === element.page)?.label }}
                   </div>
                 </div>
-                <div flex="~ gap-4 items-center justify-between wrap">
+                <div flex="~ gap-4 items-center justify-between wrap" @click.stop>
                   <div
                     flex="~ items-center"
                   >
                     {{ $t('settings.dock_item_use_original_bili_web_page') }}
-                    <Radio v-model="element.useOriginalBiliPage" />
+                    <Radio
+                      :model-value="element.useOriginalBiliPage"
+                      @update:model-value="updateDockItemPageMode(element, $event as boolean)"
+                    />
                   </div>
                   <div flex="~ items-center">
                     {{ $t('settings.dock_item_open_in_new_tab') }}
@@ -164,9 +186,6 @@ function handleToggleDockItem(dockItem: any) {
       </SettingsItem>
       <SettingsItem :title="$t('settings.back_to_top_and_refresh_buttons_are_separated')" right-width="auto">
         <Radio v-model="settings.backToTopAndRefreshButtonsAreSeparated" />
-      </SettingsItem>
-      <SettingsItem :title="$t('settings.always_show_dock_actions_when_auto_hide')" right-width="auto">
-        <Radio v-model="settings.alwaysShowDockActionsWhenAutoHide" />
       </SettingsItem>
       <SettingsItem :title="$t('settings.enable_undo_refresh_button')" :desc="$t('settings.enable_undo_refresh_button_desc')" right-width="auto">
         <Radio v-model="settings.enableUndoRefreshButton" />

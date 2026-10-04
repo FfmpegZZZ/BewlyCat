@@ -39,23 +39,26 @@ export async function getManifest() {
     permissions: [
       'storage',
       'declarativeNetRequest',
-      ...(!isFirefox && !isSafari ? ['scripting'] : []),
+      'cookies',
+      ...(!isSafari ? ['scripting'] : []),
       ...isFirefox
-        ? ['webRequest', 'webRequestBlocking', 'cookies']
+        ? ['webRequest', 'webRequestBlocking']
         : [],
     ],
     host_permissions: [
       '*://*.bilibili.com/*',
       '*://*.hdslb.com/*',
     ],
+    // IframePage and IframeDrawer embed supported Bilibili pages and rely on the
+    // content scripts for styling, layout synchronization, and interactions.
+    // Blank frames are not supported pages, so match_about_blank is intentionally omitted.
     content_scripts: [
       {
         matches: [...CONTENT_SCRIPT_MATCHES],
         exclude_matches: [...CONTENT_SCRIPT_EXCLUDE_MATCHES],
-        js: ['./dist/contentScripts/index.global.js'],
+        js: ['./dist/contentScripts/pageLoading.js', './dist/contentScripts/index.global.js'],
         css: ['./dist/contentScripts/style.css'],
         run_at: 'document_start',
-        match_about_blank: true,
         all_frames: true,
       },
       {
@@ -63,16 +66,16 @@ export async function getManifest() {
         exclude_matches: [...CONTENT_SCRIPT_EXCLUDE_MATCHES],
         js: ['./dist/contentScripts/inject.global.js'],
         run_at: 'document_start',
-        match_about_blank: true,
         all_frames: true,
         world: 'MAIN',
       },
     ],
     web_accessible_resources: [
       {
-        resources: ['dist/contentScripts/style.css', 'assets/*'],
-        matches: ['<all_urls>'],
-        // matches: ['./assets/*'],
+        resources: [
+          'assets/*',
+        ],
+        matches: [...CONTENT_SCRIPT_MATCHES],
       },
     ],
     content_security_policy: isFirefox

@@ -1,10 +1,25 @@
 <script lang="ts" setup>
-import { SEARCH_BAR_CHARACTERS } from '~/constants/imgs'
+import { useI18n } from 'vue-i18n'
+
+import { resolveSearchBarCharacterUrl, SEARCH_BAR_CHARACTERS } from '~/constants/imgs'
 import { settings } from '~/logic'
 
 import ChangeWallpaper from '../../components/ChangeWallpaper.vue'
 import SettingsItem from '../../components/SettingsItem.vue'
 import SettingsItemGroup from '../../components/SettingsItemGroup.vue'
+import SettingsSegmentedControl from '../../components/SettingsSegmentedControl.vue'
+
+const { t } = useI18n()
+
+const logoColorOptions = computed(() => [
+  { label: t('settings.logo_color_opt.theme_color'), value: 'themeColor' as const },
+  { label: t('settings.logo_color_opt.white'), value: 'white' as const },
+])
+
+const paginationModeOptions = computed(() => [
+  { label: t('settings.search_results_pagination_mode_opt.scroll'), value: 'scroll' as const },
+  { label: t('settings.search_results_pagination_mode_opt.pagination'), value: 'pagination' as const },
+])
 
 watch(() => settings.value.individuallySetSearchPageWallpaper, (newValue) => {
   if (newValue)
@@ -22,30 +37,11 @@ function changeSearchBarFocusCharacter(url: string) {
   <div>
     <SettingsItemGroup :title="$t('settings.group_logo')">
       <SettingsItem :title="$t('settings.logo_color')" right-width="auto">
-        <div w="220px" flex rounded="$bew-radius" bg="$bew-fill-1" p-1>
-          <div
-            flex="1 ~" items-center justify-center py-1 cursor-pointer
-            text-center rounded="$bew-radius"
-            :style="{
-              background: settings.searchPageLogoColor === 'themeColor' || !settings.searchPageLogoColor ? 'var(--bew-theme-color)' : '',
-              color: settings.searchPageLogoColor === 'themeColor' || !settings.searchPageLogoColor ? 'white' : '',
-            }"
-            @click="settings.searchPageLogoColor = 'themeColor'"
-          >
-            {{ $t('settings.logo_color_opt.theme_color') }}
-          </div>
-          <div
-            flex="1 ~" items-center justify-center py-1 cursor-pointer
-            text-center rounded="$bew-radius"
-            :style="{
-              background: settings.searchPageLogoColor === 'white' ? 'var(--bew-theme-color)' : '',
-              color: settings.searchPageLogoColor === 'white' ? 'white' : '',
-            }"
-            @click="settings.searchPageLogoColor = 'white'"
-          >
-            {{ $t('settings.logo_color_opt.white') }}
-          </div>
-        </div>
+        <SettingsSegmentedControl
+          v-model="settings.searchPageLogoColor"
+          :label="$t('settings.logo_color')"
+          :options="logoColorOptions"
+        />
       </SettingsItem>
 
       <SettingsItem :title="$t('settings.enable_logo_glowing_effect')" right-width="auto">
@@ -72,7 +68,7 @@ function changeSearchBarFocusCharacter(url: string) {
 
       <SettingsItem :title="$t('settings.bg_blurs_when_the_search_bar_is_focused')" right-width="auto">
         <template #desc>
-          <span color="$bew-warning-color">{{ $t('common.performance_impact_warn') }}</span>
+          <span class="bew-warning-text">{{ $t('common.performance_impact_warn') }}</span>
         </template>
 
         <Radio v-model="settings.searchPageBlurredOnSearchFocus" />
@@ -82,19 +78,21 @@ function changeSearchBarFocusCharacter(url: string) {
         <template #bottom>
           <div grid="~ xl:cols-8 lg:cols-6 cols-5 gap-4">
             <picture
+              class="bew-settings-option--lift"
               aspect-square bg="$bew-fill-1" rounded="$bew-radius" overflow-hidden
               un-border="4 transparent" cursor-pointer
               grid place-items-center
               :class="{ 'selected-wallpaper': settings.searchPageSearchBarFocusCharacter === '' }"
               @click="changeSearchBarFocusCharacter('')"
             >
-              <div i-tabler:photo-off text="3xl $bew-text-3" />
+              <div i-tabler:photo-off text="size-$bew-icon-size-xl $bew-text-3" />
             </picture>
             <Tooltip v-for="item in SEARCH_BAR_CHARACTERS" :key="item.url" placement="top" :content="item.name" aspect-square>
               <picture
+                class="bew-settings-option--lift"
                 aspect-square bg="$bew-fill-1" rounded="$bew-radius" overflow-hidden
                 un-border="4 transparent" w-full
-                :class="{ 'selected-wallpaper': settings.searchPageSearchBarFocusCharacter === item.url }"
+                :class="{ 'selected-wallpaper': resolveSearchBarCharacterUrl(settings.searchPageSearchBarFocusCharacter) === item.url }"
                 @click="changeSearchBarFocusCharacter(item.url)"
               >
                 <img
@@ -120,9 +118,16 @@ function changeSearchBarFocusCharacter(url: string) {
     <SettingsItemGroup :title="$t('settings.group_search_results')">
       <SettingsItem :title="$t('settings.use_plugin_search_results_page')" right-width="auto">
         <template #desc>
-          <span>{{ $t('settings.use_plugin_search_results_page_desc') }}</span>
+          <span>
+            {{ settings.useOriginalBilibiliHomepage
+              ? $t('settings.use_plugin_search_results_page_disabled_by_original_homepage')
+              : $t('settings.use_plugin_search_results_page_desc') }}
+          </span>
         </template>
-        <Radio v-model="settings.usePluginSearchResultsPage" />
+        <Radio
+          v-model="settings.usePluginSearchResultsPage"
+          :disabled="settings.useOriginalBilibiliHomepage"
+        />
       </SettingsItem>
 
       <SettingsItem :title="$t('settings.depersonalize_search_results')" right-width="auto">
@@ -136,30 +141,11 @@ function changeSearchBarFocusCharacter(url: string) {
         <template #desc>
           <span>{{ $t('settings.search_results_pagination_mode_desc') }}</span>
         </template>
-        <div w="220px" flex rounded="$bew-radius" bg="$bew-fill-1" p-1>
-          <div
-            flex="1 ~" items-center justify-center py-1 cursor-pointer
-            text-center rounded="$bew-radius"
-            :style="{
-              background: settings.searchResultsPaginationMode === 'scroll' ? 'var(--bew-theme-color)' : '',
-              color: settings.searchResultsPaginationMode === 'scroll' ? 'white' : '',
-            }"
-            @click="settings.searchResultsPaginationMode = 'scroll'"
-          >
-            {{ $t('settings.search_results_pagination_mode_opt.scroll') }}
-          </div>
-          <div
-            flex="1 ~" items-center justify-center py-1 cursor-pointer
-            text-center rounded="$bew-radius"
-            :style="{
-              background: settings.searchResultsPaginationMode === 'pagination' ? 'var(--bew-theme-color)' : '',
-              color: settings.searchResultsPaginationMode === 'pagination' ? 'white' : '',
-            }"
-            @click="settings.searchResultsPaginationMode = 'pagination'"
-          >
-            {{ $t('settings.search_results_pagination_mode_opt.pagination') }}
-          </div>
-        </div>
+        <SettingsSegmentedControl
+          v-model="settings.searchResultsPaginationMode"
+          :label="$t('settings.search_results_pagination_mode')"
+          :options="paginationModeOptions"
+        />
       </SettingsItem>
     </SettingsItemGroup>
 

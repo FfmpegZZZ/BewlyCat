@@ -1,4 +1,6 @@
 import { settings } from '~/logic'
+import { applyBewlyWidescreen, exitBewlyWidescreen, isBewlyWidescreenActive, isBewlyWidescreenEngaged } from '~/utils/bewlyWidescreen'
+import { isVideoOrBangumiPage, isVideoPlaybackPage } from '~/utils/main'
 // 导入需要的函数
 import {
   adjustVideoSize,
@@ -17,6 +19,7 @@ import {
   webFullscreenClick,
   widescreenClick,
 } from '~/utils/player'
+import { captureVideoScreenshot } from '~/utils/videoScreenshot'
 
 // 定义快捷键处理器类型
 type ShortcutHandler = (e: KeyboardEvent, player?: Element) => void
@@ -34,11 +37,6 @@ export function registerShortcutHandler(id: string, handler: ShortcutHandler): b
   try {
     if (!id || typeof handler !== 'function') {
       return false
-    }
-
-    // 如果已存在处理器，先注销
-    if (shortcutHandlers[id]) {
-      // 覆盖现有处理器
     }
 
     shortcutHandlers[id] = handler
@@ -104,7 +102,7 @@ export function setupShortcutHandlers() {
   // 如果快捷键总开关关闭，移除现有监听器并返回
   if (settings.value.keyboard === false) {
     if (keydownListener) {
-      document.removeEventListener('keydown', keydownListener, true)
+      window.removeEventListener('keydown', keydownListener, true)
       keydownListener = null
     }
     cachedShortcuts = null
@@ -113,7 +111,7 @@ export function setupShortcutHandlers() {
 
   // 如果已存在监听器，先移除
   if (keydownListener) {
-    document.removeEventListener('keydown', keydownListener, true)
+    window.removeEventListener('keydown', keydownListener, true)
     keydownListener = null
   }
 
@@ -139,9 +137,13 @@ export function setupShortcutHandlers() {
       return
     }
 
-    // 检查是否事件来自插件容器
     const target = e.target as HTMLElement
-    if (target && target.id === 'bewly') {
+    // 分隔线使用方向键和 Home/End 调宽，不能被播放器快捷键提前拦截。
+    if (target?.closest?.('.bewly-widescreen-sidebar-resize-handle'))
+      return
+
+    // 检查是否事件来自插件容器
+    if ((target && target.id === 'bewly') || document.getElementById('bewly')?.classList.contains('settings-open')) {
       return
     }
     // 更新快捷键配置缓存
@@ -188,11 +190,17 @@ export function setupShortcutHandlers() {
           // 兼容：配置为 '+' 时，允许直接按 '=' 键触发（标准键盘上 '+' 需要 Shift+=）
           if (configKey.toLowerCase() === keyCombo.toLowerCase()
             || (configKey === '+' && keyCombo === '=')) {
+            // 截图只在视频播放页响应，避免拦截其他页面或输入法的按键。
+            if (id === 'videoScreenshot'
+              && (e.isComposing || !(isVideoPlaybackPage() || isVideoOrBangumiPage()))) {
+              continue
+            }
+
             // 获取处理函数
             const handler = shortcutHandlers[id]
             if (handler) {
               e.preventDefault()
-              e.stopPropagation()
+              e.stopImmediatePropagation()
 
               try {
                 handler(e, player || undefined)
@@ -215,7 +223,8 @@ export function setupShortcutHandlers() {
   }
 
   // 添加事件监听器
-  document.addEventListener('keydown', keydownListener, true)
+  // 在 window 捕获阶段监听，确保覆盖时先于 Bilibili 的 document/播放器处理器拦截事件。
+  window.addEventListener('keydown', keydownListener, true)
 }
 
 /**
@@ -231,12 +240,38 @@ export function registerDefaultHandlers(): void {
 
   // 网页全屏
   registerShortcutHandler('webFullscreen', () => {
+    if (isBewlyWidescreenActive())
+      exitBewlyWidescreen({ userInitiated: true })
     webFullscreenClick()
   })
 
   // 宽屏
   registerShortcutHandler('widescreen', () => {
+    if (isBewlyWidescreenActive())
+      exitBewlyWidescreen({ userInitiated: true })
     widescreenClick()
+  })
+
+  // Bewly 宽屏
+  registerShortcutHandler('bewlyWidescreen', (event) => {
+    if (event.repeat)
+      return
+
+    if (isBewlyWidescreenEngaged()) {
+      exitBewlyWidescreen({ userInitiated: true })
+      return
+    }
+
+    const isBrowserFullscreen = !!(document.fullscreenElement
+      || (document as Document & { webkitFullscreenElement?: Element | null }).webkitFullscreenElement)
+    const webFullscreenButton = document.querySelector<HTMLElement>('.bpx-player-ctrl-web, .bilibili-player-video-web-fullscreen')
+    if (!isVideoOrBangumiPage()
+      || isBrowserFullscreen
+      || webFullscreenButton?.classList.contains('bpx-state-entered')) {
+      return
+    }
+
+    applyBewlyWidescreen(settings.value.bewlyWidescreenSidebarPosition || 'right')
   })
 
   // 短步后退
@@ -277,6 +312,14 @@ export function registerDefaultHandlers(): void {
   // 字幕
   registerShortcutHandler('caption', () => {
     toggleCaption()
+  })
+
+  // 视频截图独立于控制栏按钮开关，长按时只截取一次。
+  registerShortcutHandler('videoScreenshot', (event) => {
+    if (event.repeat)
+      return
+
+    void captureVideoScreenshot()
   })
 
   // 增加播放速度
@@ -465,14 +508,14 @@ function generateKeyCombo(e: KeyboardEvent): string {
 
   // 处理主按键
   let mainKey = e.key
+  if (mainKey === ' ') {
+    mainKey = 'Space'
+  }
   // 对于单字符按键转为大写
-  if (mainKey.length === 1) {
+  else if (mainKey.length === 1) {
     mainKey = mainKey.toUpperCase()
   }
   // 特殊按键处理
-  else if (mainKey === ' ') {
-    mainKey = 'Space'
-  }
   else if (mainKey === 'ArrowUp') {
     mainKey = '↑'
   }
