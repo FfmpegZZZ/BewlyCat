@@ -158,7 +158,7 @@ jobs:
           xcrun safari-web-extension-converter ./extension-safari \
             --project-location ./extension-safari-macos \
             --macos-only \
-            --bundle-identifier cn.celeus.bewlycat \
+            --bundle-identifier cn.celeus.BewlyCat \
             --no-open \
             --no-prompt \
             --force
@@ -192,6 +192,7 @@ jobs:
             -derivedDataPath build \
             ARCHS="arm64 x86_64" \
             ONLY_ACTIVE_ARCH=NO \
+            MACOSX_DEPLOYMENT_TARGET=14.0 \
             CODE_SIGN_IDENTITY="-" \
             CODE_SIGN_STYLE=Manual \
             DEVELOPMENT_TEAM="" \
