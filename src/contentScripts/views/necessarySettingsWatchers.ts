@@ -4,6 +4,7 @@ import { IFRAME_TOP_BAR_CHANGE } from '~/constants/globalEvents'
 import { setUselessFeedCardBlockerEnabled, shouldEnableUselessFeedCardBlocker } from '~/contentScripts/features/blockUselessFeedCards'
 import { LanguageType } from '~/enums/appEnums'
 import { appAuthTokens, FROSTED_GLASS_BLUR_MAX_PX, FROSTED_GLASS_BLUR_MIN_PX, localSettings, originalSettings, settings } from '~/logic'
+import { syncActionAnimationFilter } from '~/utils/actionAnimationTheme'
 import { detachOriginalBilibiliTopBar, ensureOriginalBilibiliTopBarAppended, resetBilibiliTopBarInlineStyles, setOriginalBilibiliTopBarScrolled, shouldShowOriginalBilibiliTopBar } from '~/utils/bilibiliTopBar'
 import { cleanBilibiliShareText, getUserID, injectCSS, isHomePage, isInIframe, isVideoPlaybackPage } from '~/utils/main'
 
@@ -183,6 +184,27 @@ export function setupNecessarySettingsWatchers() {
     { immediate: true },
   )
 
+  // text-autospace 为继承属性，设在根元素即可覆盖原生页面与 Shadow DOM 内的插件 UI；
+  // 不支持该属性的浏览器会忽略此规则
+  let cjkLatinAutospaceStyleEl: HTMLStyleElement | null = null
+  watch(
+    () => settings.value.enableCjkLatinAutospace,
+    (enabled) => {
+      if (enabled) {
+        cjkLatinAutospaceStyleEl ??= injectCSS(`
+          html {
+            text-autospace: normal !important;
+          }
+        `)
+      }
+      else {
+        cjkLatinAutospaceStyleEl?.remove()
+        cjkLatinAutospaceStyleEl = null
+      }
+    },
+    { immediate: true },
+  )
+
   watch(
     () => settings.value.enableFrostedGlass,
     applyFrostedGlassState,
@@ -294,6 +316,7 @@ export function setupNecessarySettingsWatchers() {
       }
 
       document.documentElement.style.setProperty('--bew-theme-color', settings.value.themeColor)
+      syncActionAnimationFilter(settings.value.themeColor)
     },
     { immediate: true },
   )
@@ -451,6 +474,14 @@ export function setupNecessarySettingsWatchers() {
     () => settings.value.hideCommentImageScrollbar,
     (enabled) => {
       document.documentElement.classList.toggle('bewly-hide-comment-image-scrollbar', enabled)
+    },
+    { immediate: true },
+  )
+
+  watch(
+    () => settings.value.imageViewerCloseAtBottom,
+    (enabled) => {
+      document.documentElement.classList.toggle('bewly-image-viewer-close-bottom', enabled)
     },
     { immediate: true },
   )

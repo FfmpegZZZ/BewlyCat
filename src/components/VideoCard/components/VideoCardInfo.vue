@@ -7,7 +7,7 @@ import { calcTimeSince, numFormatter } from '~/utils/dataFormatter'
 import VideoWatchedTag from '../../VideoWatchedTag.vue'
 import { vMetaOverflow } from '../directives/metaOverflow'
 import type { Video } from '../types'
-import { getTagSearchUrl } from '../utils'
+import { getTagSearchUrl, hasAuthorAvatar } from '../utils'
 import VideoCardAuthorAvatar from '../VideoCardAuthor/components/VideoCardAuthorAvatar.vue'
 import VideoCardAuthorName from '../VideoCardAuthor/components/VideoCardAuthorName.vue'
 
@@ -26,6 +26,8 @@ interface Props {
   pluginComputedTags: string[]
   hideAuthor?: boolean
   hideWatchedBadge?: boolean
+  /** 信息较少的卡片（如 App 推荐无头像、无发布时间）将 UP 主与标签合并为单行 */
+  compactMeta?: boolean
 }
 
 const props = defineProps<Props>()
@@ -43,7 +45,9 @@ defineExpose({
 const MAX_INTERFACE_TAG_COUNT = 4
 const MIN_TAG_COUNT_BEFORE_PLUGIN = 2
 
+// 空间不足时按 data-meta-priority 隐藏：时间(0) 始终保留，接口标签(2)、计算标签(3) 中先隐藏最宽的，分区(1) 最后隐藏
 interface VideoCardTag {
+  priority: 1 | 2
   searchable: boolean
   text: string
 }
@@ -58,25 +62,28 @@ const content = computed(() => {
     : Array.isArray(rawTag)
       ? rawTag.filter(Boolean)
       : [rawTag]
+  // 分区与其他接口标签分开控制，分区始终排在最前
   const cardTags: VideoCardTag[] = [
-    ...(video?.category
-      ? [{ searchable: true, text: video.category }]
+    ...(currentSettings.showVideoCardCategory && video?.category
+      ? [{ priority: 1 as const, searchable: true, text: video.category }]
       : []),
-    ...displayTags.map(text => ({ searchable: false, text })),
-    ...(video?.searchableTags ?? [])
-      .filter(Boolean)
-      .map(text => ({ searchable: true, text })),
+    ...(currentSettings.showVideoCardVideoTag
+      ? [
+          ...displayTags.map(text => ({ priority: 2 as const, searchable: false, text })),
+          ...(video?.searchableTags ?? [])
+            .filter(Boolean)
+            .map(text => ({ priority: 2 as const, searchable: true, text })),
+        ]
+      : []),
   ]
-  const visibleVideoTags = currentSettings.showVideoCardVideoTag
-    ? cardTags.slice(0, MAX_INTERFACE_TAG_COUNT)
-    : []
+  const visibleVideoTags = cardTags.slice(0, MAX_INTERFACE_TAG_COUNT)
   const remainingPluginTagCount = Math.max(0, MIN_TAG_COUNT_BEFORE_PLUGIN - visibleVideoTags.length)
   const visiblePluginComputedTags = currentSettings.showVideoCardRecommendTag && remainingPluginTagCount > 0
     ? props.pluginComputedTags.slice(0, remainingPluginTagCount)
     : []
   const authorAvatarEnabled = !props.hideAuthor && currentSettings.showVideoCardAuthorAvatar
   const authorNameEnabled = !props.hideAuthor && currentSettings.showVideoCardAuthorName
-  const showAuthorAvatar = authorAvatarEnabled && Boolean(video?.author)
+  const showAuthorAvatar = authorAvatarEnabled && hasAuthorAvatar(video?.author)
   const showAuthorName = authorNameEnabled && Boolean(video?.author)
   const showPublishTime = currentSettings.showVideoCardPublishTime
     && (Boolean(video?.publishedTimestamp) || Boolean(video?.capsuleText))
@@ -85,7 +92,8 @@ const content = computed(() => {
     && (Boolean(video?.view) || Boolean(video?.viewStr))
   const showLegacyDanmakuCount = currentSettings.showVideoCardDanmakuCount
     && (Boolean(video?.danmaku) || Boolean(video?.danmakuStr))
-  const metaPlaceholderEnabled = currentSettings.showVideoCardVideoTag
+  const metaPlaceholderEnabled = currentSettings.showVideoCardCategory
+    || currentSettings.showVideoCardVideoTag
     || currentSettings.showVideoCardRecommendTag
     || currentSettings.showVideoCardPublishTime
     || Boolean(video?.type)
@@ -101,6 +109,7 @@ const content = computed(() => {
     authorNameEnabled,
     hasLegacyStats: showLegacyViewCount || showLegacyDanmakuCount,
     hasVisibleMeta,
+    isCompactMeta: props.layout === 'modern' && !!props.compactMeta && showAuthorName,
     isModernLayout: props.layout === 'modern',
     metaPlaceholderEnabled,
     showAuthorAvatar,
@@ -150,9 +159,12 @@ const content = computed(() => {
             class="keep-two-lines" :class="[
               content.isModernLayout && moreBtn ? 'w-[calc(100%-40px)]' : 'w-full',
               content.isModernLayout ? 'video-card-title' : '',
+              // Same font size as the real title: the two-line height is in em,
+              // so a larger skeleton font made each row jump when cards arrived.
+              titleFontSizeClass,
             ]"
             :style="titleStyle"
-            text="overflow-ellipsis $bew-text-1 lg"
+            text="overflow-ellipsis $bew-text-1"
           >
             <!-- 使用与真实文本相同的行高填充，考虑 line-height -->
             <div w-full bg="$bew-skeleton" rounded="$bew-radius-sm" style="height: 1em; margin-bottom: calc((var(--bew-title-line-height, 1.35) - 1) * 0.5em);" />
@@ -164,9 +176,30 @@ const content = computed(() => {
           />
         </div>
 
+        <!-- Modern compact layout: Author & tags in one row skeleton -->
+        <div
+          v-if="layout === 'modern' && compactMeta && content.authorNameEnabled"
+          class="video-card-meta video-card-meta--compact"
+          flex="~ gap-2 items-center"
+          w="full"
+        >
+          <div
+            v-if="content.authorNameEnabled"
+            w="30%" bg="$bew-skeleton" rounded="$bew-radius-sm"
+            :class="authorFontSizeClass"
+            style="height: 1em;"
+          />
+          <div
+            v-if="content.metaPlaceholderEnabled"
+            w="30%" bg="$bew-skeleton" rounded="$bew-radius-sm"
+            :class="metaFontSizeClass"
+            style="height: calc(1em + 0.24em);"
+          />
+        </div>
+
         <!-- Modern layout: Author info skeleton -->
         <div
-          v-if="layout === 'modern' && (content.authorAvatarEnabled || content.authorNameEnabled)"
+          v-else-if="layout === 'modern' && (content.authorAvatarEnabled || content.authorNameEnabled)"
           class="video-card-meta"
           flex="~ gap-2 items-center"
           w="full"
@@ -354,7 +387,7 @@ const content = computed(() => {
             v-for="videoTag in content.visibleVideoTags"
             :key="`video-${videoTag.searchable}-${videoTag.text}`"
             class="video-card-meta__chip"
-            data-meta-priority="1"
+            :data-meta-priority="videoTag.priority"
             :class="{ 'video-card-tag--searchable': videoTag.searchable }"
             un-text="$bew-theme-color"
             p="x-2"
@@ -372,7 +405,7 @@ const content = computed(() => {
           <span
             v-for="pluginTag in content.visiblePluginComputedTags"
             :key="`plugin-${pluginTag}`"
-            data-meta-priority="2"
+            data-meta-priority="3"
             class="video-card-meta__chip"
             text="$bew-theme-color"
             p="x-2"
@@ -397,6 +430,7 @@ const content = computed(() => {
         <div
           v-if="layout === 'modern' && (content.showAuthorAvatar || content.showAuthorName)"
           class="video-card-meta"
+          :class="{ 'video-card-meta--compact': content.isCompactMeta }"
           flex="~ gap-2 items-center"
           w="full"
         >
@@ -407,9 +441,14 @@ const content = computed(() => {
             compact
           />
 
-          <div v-if="content.showAuthorName || content.hasVisibleMeta" flex="~ col gap-1" w="full" min-w-0>
+          <div
+            v-if="content.showAuthorName || content.hasVisibleMeta"
+            :class="content.isCompactMeta ? 'flex items-center gap-2' : 'flex flex-col gap-1'"
+            w="full" min-w-0
+          >
             <div
               v-if="content.showAuthorName"
+              class="video-card-meta__author"
               min-w-0
               flex="~ items-center gap-2"
               text="$bew-text-2"
@@ -443,7 +482,7 @@ const content = computed(() => {
                 v-for="videoTag in content.visibleVideoTags"
                 :key="`video-${videoTag.searchable}-${videoTag.text}`"
                 class="video-card-meta__chip"
-                data-meta-priority="1"
+                :data-meta-priority="videoTag.priority"
                 :class="{ 'video-card-tag--searchable': videoTag.searchable }"
                 un-text="$bew-theme-color"
                 p="x-2"
@@ -461,7 +500,7 @@ const content = computed(() => {
               <span
                 v-for="pluginTag in content.visiblePluginComputedTags"
                 :key="`plugin-${pluginTag}`"
-                data-meta-priority="2"
+                data-meta-priority="3"
                 class="video-card-meta__chip"
                 text="$bew-theme-color"
                 p="x-2"
@@ -501,7 +540,7 @@ const content = computed(() => {
               v-for="videoTag in content.visibleVideoTags"
               :key="`legacy-video-${videoTag.searchable}-${videoTag.text}`"
               class="video-card-meta__chip"
-              data-meta-priority="1"
+              :data-meta-priority="videoTag.priority"
               :class="{ 'video-card-tag--searchable': videoTag.searchable }"
               un-text="$bew-theme-color" lh-6 p="x-2" rounded="$bew-radius" bg="$bew-theme-color-20"
               :title="videoTag.text"
@@ -514,7 +553,7 @@ const content = computed(() => {
             <span
               v-for="pluginTag in content.visiblePluginComputedTags"
               :key="`plugin-${pluginTag}`"
-              data-meta-priority="2"
+              data-meta-priority="3"
               class="video-card-meta__chip"
               text="$bew-theme-color"
               lh-6
@@ -602,7 +641,7 @@ const content = computed(() => {
                 v-for="videoTag in content.visibleVideoTags"
                 :key="`legacy-video-${videoTag.searchable}-${videoTag.text}`"
                 class="video-card-meta__chip"
-                data-meta-priority="1"
+                :data-meta-priority="videoTag.priority"
                 :class="{ 'video-card-tag--searchable': videoTag.searchable }"
                 un-text="$bew-theme-color" lh-6 p="x-2" rounded="$bew-radius" bg="$bew-theme-color-20"
                 :title="videoTag.text"
@@ -615,7 +654,7 @@ const content = computed(() => {
               <span
                 v-for="pluginTag in content.visiblePluginComputedTags"
                 :key="`plugin-${pluginTag}`"
-                data-meta-priority="2"
+                data-meta-priority="3"
                 class="video-card-meta__chip"
                 text="$bew-theme-color"
                 lh-6
@@ -654,6 +693,8 @@ const content = computed(() => {
 .video-card-title {
   &.keep-two-lines {
     min-height: calc(var(--bew-title-line-height, 1.35) * 2em);
+    // 字号类同时设置了行高，按实际行高保留两行，单行标题下方的信息才能与两行标题对齐
+    min-height: 2lh;
   }
   &.keep-one-line {
     min-height: auto;
@@ -685,6 +726,30 @@ const content = computed(() => {
 }
 
 .video-card-meta > div:last-child {
+  min-width: 0;
+}
+
+// 单行布局：只占一行高度并顶部对齐，UP 主名最多占一半宽度，其余留给标签
+.video-card-meta--compact {
+  min-height: 24px;
+  max-height: 24px;
+}
+
+.video-card-meta--compact .video-card-meta__author {
+  flex: 0 1 auto;
+  max-width: 50%;
+
+  &:only-child {
+    max-width: 100%;
+  }
+
+  :deep(.channel-name) {
+    margin-right: 0;
+  }
+}
+
+.video-card-meta--compact .video-card-meta-row {
+  flex: 1 1 0;
   min-width: 0;
 }
 

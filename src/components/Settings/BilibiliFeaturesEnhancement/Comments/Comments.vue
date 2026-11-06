@@ -101,7 +101,9 @@ const commentReplyPaginationModeOptions = computed<{ label: string, value: Comme
           v-model="settings.commentReplyTreeContainerHeight"
           :min="COMMENT_REPLY_TREE_CONTAINER_MIN_HEIGHT"
           :max="COMMENT_REPLY_TREE_CONTAINER_MAX_HEIGHT"
-          :label="`${settings.commentReplyTreeContainerHeight}px`"
+          editable
+          unit="px"
+          :aria-label="$t('settings.comment_reply_tree_container_height')"
         />
       </div>
     </SettingsItem>
@@ -147,6 +149,14 @@ const commentReplyPaginationModeOptions = computed<{ label: string, value: Comme
     >
       <Radio v-model="settings.hideCommentImageScrollbar" />
     </SettingsItem>
+
+    <SettingsItem
+      :title="$t('settings.image_viewer_close_at_bottom')"
+      :desc="$t('settings.image_viewer_close_at_bottom_desc')"
+      right-width="auto"
+    >
+      <Radio v-model="settings.imageViewerCloseAtBottom" />
+    </SettingsItem>
   </SettingsItemGroup>
 </template>
 
@@ -159,6 +169,6 @@ const commentReplyPaginationModeOptions = computed<{ label: string, value: Comme
 }
 
 .slider-control {
-  width: 220px;
+  width: 260px;
 }
 </style>

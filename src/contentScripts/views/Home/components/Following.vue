@@ -46,6 +46,7 @@ import VideoCardGrid from '~/components/VideoCardGrid.vue'
 import { useBewlyApp } from '~/composables/useAppProvider'
 import { useHomeTabState } from '~/composables/useHomeTabState'
 import { OVERLAY_SCROLL_BAR_SCROLL } from '~/constants/globalEvents'
+import { getVideoZoneName } from '~/constants/videoZones'
 import type { GridLayoutType } from '~/logic'
 import { settings } from '~/logic'
 import {
@@ -62,8 +63,10 @@ import { calcTimeSince, parseStatNumber } from '~/utils/dataFormatter'
 import type { FollowingGroup, FollowingGroupsResult, FollowingRelationUser } from '~/utils/followingGroups'
 import { getFollowingGroupIds, groupFollowingUploaders } from '~/utils/followingGroups'
 import { decodeHtmlEntities } from '~/utils/htmlDecode'
+import { jumpScrollTo } from '~/utils/main'
 import emitter from '~/utils/mitt'
 
+import { getHomeContentScrollTop, isWithinHomeContentStart } from '../homeScroll'
 import FollowingGroupMenu from './FollowingGroupMenu.vue'
 import FollowingUploaderMenu from './FollowingUploaderMenu.vue'
 
@@ -130,6 +133,8 @@ const groupMenuRef = ref<InstanceType<typeof FollowingGroupMenu>>()
 const selectedUploader = tabState.ref<number | null>('selectedUploader', null) // null means "All"
 const previousSelectedUploader = tabState.ref<number | null>('previousSelectedUploader', null)
 const selectionToken = ref<number>(0) // 用于防止竞态条件的令牌
+// 切回栏目时保持当前位置，只跳过这次进入加载的固定滚动；之后主动切换或刷新仍回到信息流起点。
+let preservedEntryToken: number | null = null
 const suppressUploaderAutoLoadMore = ref(false)
 const liveListLoaded = tabState.ref<boolean>('liveListLoaded', false) // 标记直播列表是否已加载（防止重复加载）
 
@@ -162,19 +167,17 @@ function syncRefreshAvailability() {
   canRefreshHomeSubPage.value = isRefreshContextActive.value && selectedUploader.value === null
 }
 
-function getFeedStartScrollTop() {
-  return settings.value.useSearchPageModeOnHomePage ? 510 : 0
-}
-
 function pinFeedScrollToStart() {
   const viewport = scrollViewportRef.value
   if (!viewport)
     return
   const token = selectionToken.value
-  const scrollTarget = getFeedStartScrollTop()
+  if (token === preservedEntryToken)
+    return
+  const scrollTarget = getHomeContentScrollTop()
   const pinScroll = () => {
     if (tabState.isCurrent() && token === selectionToken.value && scrollViewportRef.value === viewport)
-      viewport.scrollTop = scrollTarget
+      jumpScrollTo(viewport, scrollTarget)
   }
   pinScroll()
   void nextTick(() => {
@@ -186,7 +189,7 @@ function pinFeedScrollToStart() {
 function handleFeedScroll(scrollTop: number) {
   if (!tabState.isCurrent() || isLoading.value)
     return
-  if (scrollTop > getFeedStartScrollTop() + 1)
+  if (!isWithinHomeContentStart(scrollTop))
     suppressUploaderAutoLoadMore.value = false
 }
 
@@ -1241,6 +1244,7 @@ function mapUserVideoToVideo(item: UserVideo): Video {
     danmaku: item.video_review,
     publishedTimestamp: item.created,
     capsuleText: calcTimeSince(item.created * 1000),
+    category: getVideoZoneName(item.typeid),
     tag: item.is_union_video ? t('home.collaboration') : undefined,
     threePointV2: [],
   }
@@ -1424,6 +1428,8 @@ onMounted(() => {
   // the sidebar inside initData before requesting its feed.
   if (selectedUploader.value !== null)
     void loadFollowingList()
+  if (tabState.preserveScrollOnEntry)
+    preservedEntryToken = selectionToken.value + 1
   initData()
 })
 
@@ -1450,12 +1456,20 @@ function initPageAction() {
 }
 
 defineExpose({ initData })
+
+function getItemKey(item: VideoElement) {
+  return item.uniqueId
+}
 </script>
 
 <template>
   <div class="following-layout" flex="~ gap-40px">
     <!-- Left Panel: Uploader List -->
-    <aside class="uploader-sidebar" w-200px shrink-0>
+    <aside
+      class="uploader-sidebar"
+      :class="{ 'uploader-sidebar--search-page': settings.fixedHomeTabsOnHomePage && settings.useSearchPageModeOnHomePage }"
+      w-200px shrink-0
+    >
       <div class="uploader-scroll bew-page-sidebar">
         <div class="following-display-toggle bew-segment-control bew-segment-control--static" role="group" :aria-label="$t('settings.following_sort')">
           <button
@@ -1655,7 +1669,7 @@ defineExpose({ initData })
         :empty-description="videoSearchKeyword ? (requestFailed ? $t('search.search_failed') : $t('home.following_no_search_results')) : undefined"
         :show-loading-more-skeleton="selectedUploader === null"
         :transform-item="transformVideoItem"
-        :get-item-key="(item: VideoElement) => item.uniqueId"
+        :get-item-key="getItemKey"
         :show-watcher-later="false"
         is-following-page
         show-preview
@@ -1750,6 +1764,13 @@ defineExpose({ initData })
   top: var(--following-sidebar-top);
   align-self: flex-start;
   height: calc(100vh - var(--following-sidebar-top) - var(--bew-space-2));
+}
+
+.uploader-sidebar--search-page {
+  // 搜索页模式的固定标签栏顶部偏移为 16px，侧栏使用相同基准。
+  --following-sidebar-top: calc(
+    var(--bew-top-bar-height) + var(--bew-space-4) + var(--bew-control-height) + var(--bew-space-4)
+  );
 }
 
 .uploader-scroll {

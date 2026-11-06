@@ -1,7 +1,23 @@
-import type { DisplayMoment, WatchLaterTarget } from './types'
+import type { DisplayMoment } from './types'
 
-function httpsUrl(url = '') {
+export function httpsUrl(url = '') {
   return url.replace(/^http:/, 'https:')
+}
+
+export function getSafeImageRatio(width: number, height: number) {
+  const ratio = width / height
+  return Number.isFinite(ratio) && ratio > 0 ? ratio : undefined
+}
+
+/** 视频跳转地址：优先接口给出的 jump_url，其次按 bvid / aid 拼接 */
+export function getMomentVideoUrl(video: { videoUrl?: string, bvid?: string, aid?: number | string }) {
+  if (video.videoUrl)
+    return video.videoUrl
+  if (video.bvid)
+    return `https://www.bilibili.com/video/${video.bvid}`
+  if (video.aid)
+    return `https://www.bilibili.com/video/av${video.aid}`
+  return ''
 }
 
 export function getMomentThumbnailUrl(url = '', width = 560) {
@@ -72,15 +88,6 @@ export function isCompactPlainTextMoment(moment: DisplayMoment) {
     && !moment.title
     && !moment.forward
     && (!moment.additional || isReservation)
-}
-
-export function getWatchLaterStateKey(target: WatchLaterTarget) {
-  const aid = Number(target.aid || 0)
-  if (aid)
-    return `aid:${aid}`
-  if (target.bvid)
-    return `bvid:${target.bvid}`
-  return target.epid ? `epid:${target.epid}` : ''
 }
 
 export type MomentLinkKind = 'video' | 'moment' | 'other'
@@ -187,23 +194,23 @@ export function computeMultiImageGalleryHeight(
 }
 
 /**
- * 九宫格只展示完整的三列行；非完整行（1/2/4/5/7/8 图）继续使用横向画廊。
+ * 接口下发为九宫格类型（MAJOR_TYPE_DRAW）的多图动态按宫格展示，不限张数；单图仍走单张大图。
  */
 export function shouldUseMomentImageGrid(images: string[] | undefined, isNineGrid?: boolean) {
-  const count = images?.length || 0
-  return Boolean(
-    isNineGrid
-    && count >= NINE_GRID_COLUMNS
-    && count <= NINE_GRID_COLUMNS ** 2
-    && count % NINE_GRID_COLUMNS === 0,
-  )
+  return Boolean(isNineGrid && (images?.length || 0) >= 2)
 }
 
+/** 2 张并排、4 张田字使用两列，其余三列 */
+export function getMomentImageGridColumns(imageCount: number) {
+  return imageCount === 2 || imageCount === 4 ? 2 : NINE_GRID_COLUMNS
+}
+
+/** 单元格尺寸统一按三列计算，两列宫格只占约 2/3 宽度 */
 export function computeMomentImageGridHeight(containerWidth: number, imageCount: number) {
   if (!(containerWidth > 0) || imageCount <= 0)
     return 0
 
-  const rows = Math.ceil(imageCount / NINE_GRID_COLUMNS)
+  const rows = Math.ceil(imageCount / getMomentImageGridColumns(imageCount))
   const cellSize = Math.max(
     1,
     (containerWidth - NINE_GRID_GAP * (NINE_GRID_COLUMNS - 1)) / NINE_GRID_COLUMNS,

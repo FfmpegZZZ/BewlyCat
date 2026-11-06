@@ -1,24 +1,34 @@
 // 由于是浏览器环境，所以引入的ts不能使用webextension-polyfill相关api，包含获取本地Storage，获取的是网页的localStorage
+import injectMessages from 'virtual:bewly-inject-messages'
+
 import { isSearchResultApiPath } from '~/constants/searchApi'
 import COMMENT_REPLY_TREE_GUIDES_CSS from '~/styles/commentReplyTree.scss?inline'
-import { BILIBILI_DESKTOP_USER_AGENT, isBilibiliWwwUrl } from '~/utils/bilibiliDesktopNavigation'
+import { getBilibiliDesktopNavigatorValues, isBilibiliWwwUrl } from '~/utils/bilibiliDesktopNavigation'
+import { isInBilibiliLiveContext } from '~/utils/bilibiliLive'
 import { CommentReplyPageCache } from '~/utils/commentReplyPageCache'
 import type { CommentReplyAvatarAnchor, CommentReplyTreeBranch } from '~/utils/commentReplyTree'
 import { formatCommentReplyGuideCoordinate, getCommentReplyBranchPath, getCommentReplyBranchToggleY } from '~/utils/commentReplyTree'
 import { getCommentSexIcon, normalizeCommentLocation } from '~/utils/commentUserInfo'
-import { i18n } from '~/utils/i18n'
 import { isElectron } from '~/utils/main'
 import type { PageSettingsPayload } from '~/utils/pageSettingsProtocol'
-import { createPageSettingsPayload } from '~/utils/pageSettingsProtocol'
+import { createPageSettingsPayload, readPageBootSnapshot } from '~/utils/pageSettingsProtocol'
 
 import { createLocalLoudnessController } from './audio/localLoudness'
 
 // 存储当前设置状态
 let currentSettings: PageSettingsPayload | null = null
 
+// Matches vue-i18n's default/fallback locale; only `inject.*` messages are bundled here.
+const DEFAULT_PAGE_LOCALE = 'en'
+
 function pageT(key: string, params: Record<string, unknown> = {}) {
-  const locale = currentSettings?.language || i18n.global.locale.value
-  return String(i18n.global.t(key, params, { locale }))
+  const locale = currentSettings?.language || DEFAULT_PAGE_LOCALE
+  const messageKey = key.replace(/^inject\./, '')
+  const message = injectMessages[locale]?.[messageKey] ?? injectMessages[DEFAULT_PAGE_LOCALE]?.[messageKey]
+  if (message === undefined)
+    return key
+  return message.replace(/\{(\w+)\}/g, (placeholder, name: string) =>
+    name in params ? String(params[name]) : placeholder)
 }
 let settingsReady = false
 let preventMobileRedirectEnabled = false
@@ -30,7 +40,9 @@ const settingsReadyPromise = new Promise<void>((resolve) => {
 const pageScriptGlobal = globalThis as typeof globalThis & {
   __BEWLYCAT_PAGE_SCRIPT_INITIALIZED__?: boolean
 }
+// 直播站及其内嵌框架中不改写任何页面全局对象。
 const shouldInitializePageScript = !pageScriptGlobal.__BEWLYCAT_PAGE_SCRIPT_INITIALIZED__
+  && !isInBilibiliLiveContext()
 
 if (shouldInitializePageScript)
   pageScriptGlobal.__BEWLYCAT_PAGE_SCRIPT_INITIALIZED__ = true
@@ -40,15 +52,31 @@ if (isElectronEnv) {
   console.warn('[BewlyCat] Detected Electron environment, extension disabled.')
 }
 else if (shouldInitializePageScript) {
-  const localLoudness = typeof AudioContext !== 'undefined' ? createLocalLoudnessController() : undefined
+  let localLoudness: ReturnType<typeof createLocalLoudnessController> | undefined
+  if (typeof AudioContext !== 'undefined') {
+    try {
+      localLoudness = createLocalLoudnessController()
+    }
+    catch (error) {
+      console.warn('[BewlyCat] Failed to install local loudness control.', error)
+    }
+  }
+  const isBilibiliWwwPage = isBilibiliWwwUrl(location.href)
+  // 启动快照来自主站上一次加载；跨子域或快照缺失时为 null，按默认行为处理。
+  const pageBootSnapshot = isBilibiliWwwPage ? readPageBootSnapshot() : null
+
   // 根据兼容性设置动态返回桌面 UA，默认保持浏览器原始值。
-  if (isBilibiliWwwUrl(location.href)) {
+  // 防移动端跳转默认关闭，快照确认关闭时不改写 navigator；刚开启时由网络层
+  // 规则兜底，页面内覆盖在快照更新后的下一次加载生效。
+  if (isBilibiliWwwPage && pageBootSnapshot?.preventMobileRedirect !== false) {
     const originalNavigatorValues = {
       appVersion: navigator.appVersion,
       platform: navigator.platform,
       userAgent: navigator.userAgent,
+      oscpu: (navigator as Navigator & { oscpu?: string }).oscpu,
     }
-    const defineNavigatorValue = (property: 'appVersion' | 'platform' | 'userAgent', value: string) => {
+    const desktopNavigatorValues = getBilibiliDesktopNavigatorValues(originalNavigatorValues.userAgent)
+    const defineNavigatorValue = (property: keyof typeof originalNavigatorValues, value: string) => {
       try {
         Object.defineProperty(navigator, property, {
           configurable: true,
@@ -60,9 +88,11 @@ else if (shouldInitializePageScript) {
       }
     }
 
-    defineNavigatorValue('userAgent', BILIBILI_DESKTOP_USER_AGENT)
-    defineNavigatorValue('appVersion', BILIBILI_DESKTOP_USER_AGENT.replace(/^Mozilla\//, ''))
-    defineNavigatorValue('platform', 'Win32')
+    defineNavigatorValue('userAgent', desktopNavigatorValues.userAgent)
+    defineNavigatorValue('appVersion', desktopNavigatorValues.appVersion)
+    defineNavigatorValue('platform', desktopNavigatorValues.platform)
+    if (desktopNavigatorValues.oscpu && originalNavigatorValues.oscpu !== undefined)
+      defineNavigatorValue('oscpu', desktopNavigatorValues.oscpu)
 
     const userAgentData = (navigator as Navigator & {
       userAgentData?: {
@@ -102,15 +132,18 @@ else if (shouldInitializePageScript) {
     if (!abTest || typeof abTest !== 'object' || patchedAbTests.has(abTest))
       return
 
-    const descriptor = Object.getOwnPropertyDescriptor(abTest, danmakuThreeStateExpKey)
-    let originalValue: unknown = descriptor?.value
     try {
+      const descriptor = Object.getOwnPropertyDescriptor(abTest, danmakuThreeStateExpKey)
+      // 已被其他脚本改成访问器时不再叠加覆盖
+      if (descriptor && !('value' in descriptor))
+        return
+      let originalValue: unknown = descriptor?.value
       Object.defineProperty(abTest, danmakuThreeStateExpKey, {
         configurable: true,
         enumerable: descriptor?.enumerable ?? false,
         get: () => {
           // 设置未送达时按默认值（跳过）处理
-          skipConciseDanmaku ??= currentSettings?.skipConciseDanmaku ?? true
+          skipConciseDanmaku ??= currentSettings?.skipConciseDanmaku ?? pageBootSnapshot?.skipConciseDanmaku ?? true
           return skipConciseDanmaku ? 'false' : originalValue
         },
         set: (value: unknown) => {
@@ -124,22 +157,29 @@ else if (shouldInitializePageScript) {
     }
   }
 
-  try {
-    let webAbTest: unknown = (window as Window & { webAbTest?: unknown }).webAbTest
-    patchDanmakuThreeStateExp(webAbTest)
-    // 页面内联脚本会整体赋值 window.webAbTest，需要在赋值时补上覆盖
-    Object.defineProperty(window, 'webAbTest', {
-      configurable: true,
-      enumerable: true,
-      get: () => webAbTest,
-      set: (value: unknown) => {
-        webAbTest = value
-        patchDanmakuThreeStateExp(value)
-      },
-    })
-  }
-  catch {
-    // window.webAbTest 不可重定义时保持 B 站原行为
+  // 只有主站播放页使用该实验；其他子域不改写全局实验对象，已被其他脚本接管时也不叠加。
+  // 快照确认已关闭「跳过精简弹幕」时不安装；快照缺失按默认开启处理。
+  const windowAbTestDescriptor = Object.getOwnPropertyDescriptor(window, 'webAbTest')
+  if (isBilibiliWwwPage
+    && pageBootSnapshot?.skipConciseDanmaku !== false
+    && (!windowAbTestDescriptor || 'value' in windowAbTestDescriptor)) {
+    try {
+      let webAbTest: unknown = windowAbTestDescriptor?.value
+      patchDanmakuThreeStateExp(webAbTest)
+      // 页面内联脚本会整体赋值 window.webAbTest，需要在赋值时补上覆盖
+      Object.defineProperty(window, 'webAbTest', {
+        configurable: true,
+        enumerable: true,
+        get: () => webAbTest,
+        set: (value: unknown) => {
+          webAbTest = value
+          patchDanmakuThreeStateExp(value)
+        },
+      })
+    }
+    catch {
+      // window.webAbTest 不可重定义时保持 B 站原行为
+    }
   }
 
   // 之前inject.js的内容
@@ -427,14 +467,14 @@ else if (shouldInitializePageScript) {
         #pagination #pagination-body > [data-idx="${COMMENT_REPLY_EXPAND_ALL_IDX}"] {
           order: 2;
           flex-shrink: 0;
-          margin-inline-start: auto;
+          margin-inline-start: var(--bew-space-6, 24px);
           margin-inline-end: 0;
         }
 
         #${COMMENT_REPLY_EXPAND_ALL_ID} {
           flex-shrink: 0;
           min-height: var(--bew-space-6, 24px);
-          margin-inline-start: auto;
+          margin-inline-start: var(--bew-space-4, 16px);
           padding: 0;
           border: 0;
           background: transparent;
@@ -509,10 +549,8 @@ else if (shouldInitializePageScript) {
         :host([data-bewly-comment-reply-tree]) #expander-contents {
           position: relative;
           /*
-           * 不直接移动 Lit repeat 生成的回复节点。B 站用注释节点保存
-           * keyed repeat 的边界，移动 host 而不移动这些边界会在下一次
-           * requestUpdate 后重新插入同一条回复，表现为整条评论成对重复。
-           * 用 flex order 表达树顺序可以保留原生 DOM 锚点。
+           * 树序优先连同 repeat 边界注释整段写入 DOM（见 setCommentReplyRendererOrder）；
+           * flex order 作为兜底，在识别不到边界时仍保持正确的视觉顺序。
            */
           display: flex;
           flex-direction: column;
@@ -609,6 +647,12 @@ else if (shouldInitializePageScript) {
       id: 'bewly-comment-renderer-style',
       css: `
         ${COMMENT_WIDESCREEN_COMPACT_METADATA_CSS}
+
+        /* 外层主题变量会跨 Shadow DOM 继承，无需等待原生 #body 同步 dark 类。 */
+        #body .tag {
+          color: var(--bew-comment-tag-color, var(--bili-comment-tag-color)) !important;
+          background-color: var(--bew-comment-tag-bg, var(--bili-comment-tag-bg)) !important;
+        }
 
         #body.dark .tag {
           --bili-comment-tag-color: var(--bew-comment-tag-color, var(--bili-comment-tag-color-dark)) !important;
@@ -1162,7 +1206,7 @@ else if (shouldInitializePageScript) {
     }
     const state = commentReplyPaginationStates.get(component)
     const allExpanded = state?.allRepliesExpanded === true
-    const optionsKey = `${totalPage}|${allExpanded}|${currentSettings?.language ?? i18n.global.locale.value}`
+    const optionsKey = `${totalPage}|${allExpanded}|${currentSettings?.language ?? DEFAULT_PAGE_LOCALE}`
     if (select.dataset.optionsKey !== optionsKey) {
       const options = document.createDocumentFragment()
       if (allExpanded) {
@@ -2218,24 +2262,31 @@ else if (shouldInitializePageScript) {
           queueMicrotask(() => updateCommentReplyPaginationHead(this))
           if (!isCommentReplyLoadMoreEnabled() || this.showPagination !== true || !Array.isArray(items))
             return items
-          const state = getCommentReplyPaginationState(this)
-          const currentPage = Number(this.currentPage) || 1
-          if (state.loading || state.expandAllLoading) {
-            return [{ text: pageT('inject.loading'), idx: currentPage, clickable: false }]
+          // 该 getter 在 Lit 渲染中调用，增强失败时退回原生分页，不能中断渲染。
+          try {
+            const state = getCommentReplyPaginationState(this)
+            const currentPage = Number(this.currentPage) || 1
+            if (state.loading || state.expandAllLoading) {
+              return [{ text: pageT('inject.loading'), idx: currentPage, clickable: false }]
+            }
+            if (state.allRepliesExpanded) {
+              return []
+            }
+            const totalPage = Number(this.totalPage) || 0
+            const hasNext = currentPage < totalPage
+            return [
+              ...(hasNext ? [{ text: pageT('inject.load_more'), idx: currentPage, clickable: true }] : []),
+              {
+                text: getCommentReplyBatchLabel(this),
+                idx: COMMENT_REPLY_EXPAND_ALL_IDX,
+                clickable: true,
+              },
+            ]
           }
-          if (state.allRepliesExpanded) {
-            return []
+          catch (error) {
+            console.warn('[BewlyCat] Failed to build reply pagination items.', error)
+            return items
           }
-          const totalPage = Number(this.totalPage) || 0
-          const hasNext = currentPage < totalPage
-          return [
-            ...(hasNext ? [{ text: pageT('inject.load_more'), idx: currentPage, clickable: true }] : []),
-            {
-              text: getCommentReplyBatchLabel(this),
-              idx: COMMENT_REPLY_EXPAND_ALL_IDX,
-              clickable: true,
-            },
-          ]
         },
       })
     }
@@ -2248,9 +2299,14 @@ else if (shouldInitializePageScript) {
         writable: true,
         value(this: any, ...args: any[]) {
           const cleanup = (captureCollapsedList: boolean) => {
-            // 原生收起只结束未完成请求；已加载页必须留给下次展开继续追加。
-            suspendCommentReplyPaginationForNativeCollapse(this, captureCollapsedList)
-            clearCommentReplyTreeState(this)
+            try {
+              // 原生收起只结束未完成请求；已加载页必须留给下次展开继续追加。
+              suspendCommentReplyPaginationForNativeCollapse(this, captureCollapsedList)
+              clearCommentReplyTreeState(this)
+            }
+            catch (error) {
+              console.warn('[BewlyCat] Failed to reset reply pagination state.', error)
+            }
           }
           cleanup(false)
           let result: any
@@ -2540,8 +2596,18 @@ else if (shouldInitializePageScript) {
       if (replyContainer) {
         removeCommentReplyTreeGuides(component, replyContainer)
         replyContainer.querySelectorAll('.bewly-comment-missing-parent').forEach(node => node.remove())
-        Array.from(replyContainer.children)
-          .filter(isCommentReplyRenderer)
+        const replyRenderers = Array.from(replyContainer.children).filter(isCommentReplyRenderer)
+        // 树序已写入 DOM；原生收起/重新展开前按首次出现顺序还原，与列表数据一致。
+        if (state?.enabled) {
+          const getOrder = (renderer: HTMLElement) => (
+            state.originalOrderByRenderer.get(renderer) ?? Number.MAX_SAFE_INTEGER
+          )
+          moveCommentReplyRendererNodes(
+            replyContainer,
+            [...replyRenderers].sort((a, b) => getOrder(a) - getOrder(b)),
+          )
+        }
+        replyRenderers
           .forEach((renderer) => {
             delete renderer.dataset.bewlyCommentReplyDepth
             delete renderer.dataset.bewlyCommentReplyHidden
@@ -2589,9 +2655,14 @@ else if (shouldInitializePageScript) {
         finally {
           // 分页状态保存在 WeakMap 中；临时折叠后若复用同一实例仍可恢复，
           // 这里只释放会形成强引用的树布局与全局可迭代集合。
-          suspendCommentReplyPaginationForNativeCollapse(this, true)
-          getCommentReplyPageCache(this)?.stop()
-          clearCommentReplyTreeState(this)
+          try {
+            suspendCommentReplyPaginationForNativeCollapse(this, true)
+            getCommentReplyPageCache(this)?.stop()
+            clearCommentReplyTreeState(this)
+          }
+          catch (error) {
+            console.warn('[BewlyCat] Failed to clean up reply renderer state.', error)
+          }
         }
       },
     })
@@ -4025,18 +4096,21 @@ else if (shouldInitializePageScript) {
   }
 
   /**
-   * 给回复设置视觉顺序，但保留 B 站 Lit repeat 产生的 DOM 顺序。
+   * 给回复设置视觉顺序，并在结构可识别时同步调整 DOM 顺序。
    *
    * `bili-comment-replies-renderer` 的列表由 keyed repeat 渲染。回复 host
-   * 两侧的注释节点是 repeat 的边界；以前通过 insertBefore 移动 host 会把
-   * host 与边界拆开，下一次列表更新时 Lit 会把旧节点再插入一次。用 flex
-   * item 的 order 只改变视觉位置，不触碰这些边界，因此分页/更新都不会
-   * 生成重复评论。
+   * 两侧的注释节点是 repeat 的边界；以前通过 insertBefore 只移动 host 会把
+   * host 与边界拆开，下一次列表更新时 Lit 会把旧节点再插入一次。
+   *
+   * 只用 flex order 时视觉顺序与 DOM 顺序不一致，跨多条回复拖选/复制会按
+   * DOM 顺序跳过子回复（#1327）。因此按 repeat 自身移动 part 的方式，把
+   * 「边界注释 + host + 边界注释」整段移动；识别不到边界时只保留 flex order。
    */
   function setCommentReplyRendererOrder(
     currentRenderers: HTMLElement[],
     orderedRenderers: HTMLElement[],
-  ) {
+    replyContainer?: HTMLElement,
+  ): boolean {
     const orderByRenderer = new Map(
       orderedRenderers.map((renderer, index) => [renderer, index] as const),
     )
@@ -4047,6 +4121,70 @@ else if (shouldInitializePageScript) {
       else
         renderer.style.setProperty('--bew-comment-reply-order', String(order))
     })
+    return replyContainer
+      ? moveCommentReplyRendererNodes(replyContainer, orderedRenderers)
+      : false
+  }
+
+  function isLitRepeatItemMarker(node: Node | null): node is Comment {
+    return node?.nodeType === Node.COMMENT_NODE && (node as Comment).data === ''
+  }
+
+  /** repeat 的每一项是 `<!----> host <!---->`；缺失父评占位不属于任何 part。 */
+  function getCommentReplyRendererNodeGroup(renderer: HTMLElement): Node[] | null {
+    if (!isCommentReplyRenderer(renderer))
+      return [renderer]
+
+    const start = renderer.previousSibling
+    const end = renderer.nextSibling
+    return isLitRepeatItemMarker(start) && isLitRepeatItemMarker(end)
+      ? [start, renderer, end]
+      : null
+  }
+
+  /** 返回是否实际移动了节点，调用方据此丢弃自身引起的 childList 记录。 */
+  function moveCommentReplyRendererNodes(
+    replyContainer: HTMLElement,
+    orderedRenderers: HTMLElement[],
+  ): boolean {
+    const groups: Node[][] = []
+    for (const renderer of orderedRenderers) {
+      if (renderer.parentNode !== replyContainer)
+        return false
+      const group = getCommentReplyRendererNodeGroup(renderer)
+      if (!group)
+        return false
+      groups.push(group)
+    }
+    if (groups.length < 2)
+      return false
+
+    // 以 DOM 中最后一个 repeat 项之后的节点为插入终点，它属于 repeat 的结束
+    // 边界；占位节点可能停在其前后，跳过它们以免落到 #expander-footer 之后。
+    const groupStarts = new Set(groups.map(group => group[0]))
+    let lastLitGroupEnd: Node | null = null
+    for (const node of Array.from(replyContainer.childNodes)) {
+      if (isLitRepeatItemMarker(node) && node.nextSibling instanceof HTMLElement
+        && isCommentReplyRenderer(node.nextSibling) && groupStarts.has(node)) {
+        lastLitGroupEnd = node.nextSibling.nextSibling
+      }
+    }
+    if (!lastLitGroupEnd)
+      return false
+    let reference: Node | null = lastLitGroupEnd.nextSibling
+    while (reference && groupStarts.has(reference))
+      reference = reference.nextSibling
+
+    let moved = false
+    for (let index = groups.length - 1; index >= 0; index--) {
+      const group = groups[index]
+      if (group[group.length - 1].nextSibling !== reference) {
+        group.forEach(node => replyContainer.insertBefore(node, reference))
+        moved = true
+      }
+      reference = group[0]
+    }
+    return moved
   }
 
   function getCommentReplyTreeLayoutKey(replyRenderers: HTMLElement[]): string {
@@ -4301,7 +4439,7 @@ else if (shouldInitializePageScript) {
         const originalOrder = [...replyRenderers].sort((a, b) => (
           getCommentReplyOriginalOrder(state, a) - getCommentReplyOriginalOrder(state, b)
         ))
-        setCommentReplyRendererOrder(replyRenderers, originalOrder)
+        setCommentReplyRendererOrder(replyRenderers, originalOrder, replyContainer)
       }
 
       replyRenderers.forEach((replyRenderer) => {
@@ -4377,10 +4515,14 @@ else if (shouldInitializePageScript) {
       node.renderer.style.setProperty('--bew-comment-reply-indent', getCommentReplyIndent(depth))
     })
     updateCommentReplyTreeVisibility(component, state, orderedNodes, rootNodes, collapseParentBody)
-    setCommentReplyRendererOrder(
+    const movedReplyNodes = setCommentReplyRendererOrder(
       nodes.map(node => node.renderer),
       orderedNodes.map(({ node }) => node.renderer),
+      replyContainer,
     )
+    // 本次重排已基于当前 DOM 完成，丢弃自身移动产生的记录，避免多排一帧。
+    if (movedReplyNodes)
+      state.replyContainerMutationObserver?.takeRecords()
     // 父节点展示：
     // - 直接父在本页：引导线/缩进表达层级；线条模式隐藏正文「回复 @xxx」
     // - 直接父不在本页且有正文缓存：引用卡展示原正文
@@ -4789,15 +4931,31 @@ else if (shouldInitializePageScript) {
       }
     }
 
-    const { define: originalDefine } = window.customElements
-    window.customElements.define = new Proxy(originalDefine, {
-      apply: (target, thisArg, args) => {
-        const [name, classConstructor] = args
-        if (typeof name === 'string')
-          patchCommentCustomElement(name, classConstructor)
-        return Reflect.apply(target, thisArg, args)
-      },
-    })
+    // 补丁异常只能影响 BewlyCat 自身增强，不能抛进 B 站的组件注册流程，
+    // 否则调用方脚本会在 define 处中断，评论、懒加载等后续初始化随之失效。
+    const safePatchCommentCustomElement = (name: string, classConstructor: unknown) => {
+      try {
+        patchCommentCustomElement(name, classConstructor)
+      }
+      catch (error) {
+        console.warn(`[BewlyCat] Failed to patch ${name}.`, error)
+      }
+    }
+
+    try {
+      const { define: originalDefine } = window.customElements
+      window.customElements.define = new Proxy(originalDefine, {
+        apply: (target, thisArg, args) => {
+          const [name, classConstructor] = args
+          if (typeof name === 'string')
+            safePatchCommentCustomElement(name, classConstructor)
+          return Reflect.apply(target, thisArg, args)
+        },
+      })
+    }
+    catch (error) {
+      console.warn('[BewlyCat] Failed to hook customElements.define.', error)
+    }
 
     // document_start 仍可能晚于页面内联脚本；回补已经注册的评论组件。
     const commentElementNames = new Set([
@@ -4808,7 +4966,7 @@ else if (shouldInitializePageScript) {
       'bili-comment-user-info',
     ])
     for (const name of commentElementNames)
-      patchCommentCustomElement(name, window.customElements.get(name))
+      safePatchCommentCustomElement(name, window.customElements.get(name))
   }
 
   // 添加消息监听器
@@ -4831,7 +4989,10 @@ else if (shouldInitializePageScript) {
       const isFirstTime = !settingsReady
       currentSettings = pageSettings
       localLoudness?.update({ enabled: pageSettings.localLoudnessEnabled, target: pageSettings.localLoudnessTarget, strength: pageSettings.localLoudnessStrength / 100 })
+      localLoudness?.setAudioDelayEnabled(pageSettings.audioDelayEnabled)
       preventMobileRedirectEnabled = pageSettings.preventMobileRedirect
+      if (pageSettings.observeTripleRequests)
+        installTripleRequestHooks()
       settingsReady = true
       refreshCommentReplyTrees()
       if (getCommentReplyTreeMode() === null)
@@ -4871,11 +5032,12 @@ else if (shouldInitializePageScript) {
     }
   }
 
-  const originalFetch = window.fetch
+  let originalFetch: typeof window.fetch | undefined
+  let tripleRequestHooksInstalled = false
 
   function fetchWithSearchSettings(thisArg: unknown, input: RequestInfo | URL, init?: RequestInit) {
     if (!currentSettings?.depersonalizeSearchResults)
-      return originalFetch.call(thisArg, input, init)
+      return originalFetch!.call(thisArg, input, init)
 
     const newInit: RequestInit = {
       ...init,
@@ -4883,21 +5045,135 @@ else if (shouldInitializePageScript) {
     }
 
     if (input instanceof Request)
-      return originalFetch.call(thisArg, new Request(input, newInit))
+      return originalFetch!.call(thisArg, new Request(input, newInit))
 
-    return originalFetch.call(thisArg, input, newInit)
+    return originalFetch!.call(thisArg, input, newInit)
   }
 
-  window.fetch = function (input: RequestInfo | URL, init?: RequestInit) {
-    if (isSearchResultFetch(input) && !settingsReady) {
-      return settingsReadyPromise.then(() => {
-        return fetchWithSearchSettings(this, input, init)
-      })
+  // 一键三连成功后通知插件环境，由其按收藏夹整理规则同步到对应收藏夹。
+  const TRIPLE_API_PATH = '/x/web-interface/archive/like/triple'
+
+  function isTripleRequestUrl(url: string): boolean {
+    try {
+      const requestUrl = new URL(url, window.location.href)
+      return requestUrl.hostname === 'api.bilibili.com' && requestUrl.pathname === TRIPLE_API_PATH
     }
-    if (isSearchResultFetch(input))
-      return fetchWithSearchSettings(this, input, init)
-    return originalFetch.call(this, input, init)
+    catch {
+      return false
+    }
   }
+
+  function readTripleTarget(body: unknown): { aid?: number, bvid?: string } {
+    let params: URLSearchParams | null = null
+    if (typeof body === 'string') {
+      params = new URLSearchParams(body)
+    }
+    else if (body instanceof URLSearchParams) {
+      params = body
+    }
+    else if (body instanceof FormData) {
+      const formParams = new URLSearchParams()
+      body.forEach((value, key) => {
+        if (typeof value === 'string')
+          formParams.append(key, value)
+      })
+      params = formParams
+    }
+
+    const aid = Number(params?.get('aid') || 0)
+    const bvid = params?.get('bvid') || ''
+    return {
+      aid: Number.isSafeInteger(aid) && aid > 0 ? aid : undefined,
+      bvid: bvid || undefined,
+    }
+  }
+
+  function notifyTripleResult(response: unknown, body: unknown) {
+    const result = response as { code?: number, data?: { fav?: boolean } } | null
+    if (result?.code !== 0 || !result.data?.fav)
+      return
+    window.postMessage({ type: 'BEWLY_VIDEO_TRIPLE', ...readTripleTarget(body) }, window.location.origin)
+  }
+
+  function observeTripleFetch(response: Promise<Response>, init?: RequestInit) {
+    void response
+      .then(res => res.clone().json())
+      .then(data => notifyTripleResult(data, init?.body))
+      .catch(() => {})
+    return response
+  }
+
+  function isTripleFetch(input: RequestInfo | URL): boolean {
+    try {
+      return tripleRequestHooksInstalled && isTripleRequestUrl(getFetchInputUrl(input))
+    }
+    catch {
+      return false
+    }
+  }
+
+  // 只在确有需要的页面或设置下改写 fetch/XHR，减少与 B 站及其他插件的
+  // 请求拦截叠加；包装层自身的判断失败时直接走原始请求。
+  function installFetchHook() {
+    if (originalFetch)
+      return
+    originalFetch = window.fetch
+    window.fetch = function (input: RequestInfo | URL, init?: RequestInit) {
+      if (isTripleFetch(input))
+        return observeTripleFetch(originalFetch!.call(this, input, init), init)
+      if (isSearchResultFetch(input) && !settingsReady) {
+        return settingsReadyPromise.then(() => {
+          return fetchWithSearchSettings(this, input, init)
+        })
+      }
+      if (isSearchResultFetch(input))
+        return fetchWithSearchSettings(this, input, init)
+      return originalFetch!.call(this, input, init)
+    }
+  }
+
+  function installTripleRequestHooks() {
+    if (tripleRequestHooksInstalled)
+      return
+    tripleRequestHooksInstalled = true
+    installFetchHook()
+
+    const originalXhrOpen = XMLHttpRequest.prototype.open
+    const originalXhrSend = XMLHttpRequest.prototype.send
+    const tripleXhrs = new WeakSet<XMLHttpRequest>()
+
+    XMLHttpRequest.prototype.open = function (this: XMLHttpRequest, ...args: Parameters<XMLHttpRequest['open']>) {
+      try {
+        if (isTripleRequestUrl(String(args[1])))
+          tripleXhrs.add(this)
+        else
+          tripleXhrs.delete(this)
+      }
+      catch {}
+      return (originalXhrOpen as (...openArgs: Parameters<XMLHttpRequest['open']>) => void).apply(this, args)
+    } as XMLHttpRequest['open']
+
+    XMLHttpRequest.prototype.send = function (this: XMLHttpRequest, body?: Document | XMLHttpRequestBodyInit | null) {
+      if (tripleXhrs.has(this)) {
+        this.addEventListener('load', () => {
+          try {
+            const response = this.responseType === 'json'
+              ? this.response
+              : this.responseType === '' || this.responseType === 'text'
+                ? JSON.parse(this.responseText)
+                : null
+            notifyTripleResult(response, body)
+          }
+          catch {}
+        }, { once: true })
+      }
+      return originalXhrSend.call(this, body)
+    }
+  }
+
+  // 搜索请求在页面启动时发出，需在 document_start 安装；三连监听等设置送达后再按需安装。
+  if (window.location.hostname === 'search.bilibili.com')
+    installFetchHook()
 
   // 页面加载完成后初始化随机播放（功能已迁移到contentScripts）
 
@@ -5075,21 +5351,34 @@ else if (shouldInitializePageScript) {
   }
 
   // 拦截 navigator.clipboard.writeText，启用净化分享链接功能
-  const originalWriteText = navigator.clipboard.writeText.bind(navigator.clipboard)
-  navigator.clipboard.writeText = function (text: string) {
-    if (!currentSettings?.enableCleanShareLink)
-      return originalWriteText(text)
+  const clipboard = navigator.clipboard as Clipboard | undefined
+  if (clipboard?.writeText) {
+    const originalWriteText = clipboard.writeText.bind(clipboard)
+    const getCleanShareText = (text: string) => {
+      if (!currentSettings?.enableCleanShareLink || typeof text !== 'string')
+        return text
 
-    const isBilibiliShare = /【.+?】\s*https?:\/\//.test(text)
-    const hasBilibiliUrl = /https?:\/\/(?:www\.)?bilibili\.com\//.test(text) || /https?:\/\/b23\.tv\//.test(text)
+      const isBilibiliShare = /【.+?】\s*https?:\/\//.test(text)
+      const hasBilibiliUrl = /https?:\/\/(?:www\.)?bilibili\.com\//.test(text) || /https?:\/\/b23\.tv\//.test(text)
+      if (!isBilibiliShare && !hasBilibiliUrl)
+        return text
 
-    if (isBilibiliShare || hasBilibiliUrl) {
       const includeTitle = currentSettings?.cleanShareLinkIncludeTitle ?? false
       const removeTracking = currentSettings?.cleanShareLinkRemoveTrackingParams !== false
-      const cleanedText = cleanShareText(text, includeTitle, removeTracking)
-      return originalWriteText(cleanedText)
+      return cleanShareText(text, includeTitle, removeTracking)
     }
-
-    return originalWriteText(text)
+    try {
+      clipboard.writeText = function (text: string) {
+        let finalText = text
+        try {
+          finalText = getCleanShareText(text)
+        }
+        catch {}
+        return originalWriteText(finalText)
+      }
+    }
+    catch {
+      // writeText 不可改写时保留原生复制
+    }
   }
 }

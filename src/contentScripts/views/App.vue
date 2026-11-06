@@ -5,6 +5,7 @@ import { provide, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 
 import Button from '~/components/Button.vue'
+import FirefoxScrollbar from '~/components/FirefoxScrollbar.vue'
 import Icon from '~/components/Icon.vue'
 import Radio from '~/components/Radio.vue'
 import TopBarModeSwitcher from '~/components/TopBar/components/TopBarModeSwitcher.vue'
@@ -14,7 +15,8 @@ import type { ConfirmDialogOptions, ConfirmDialogToggleField } from '~/composabl
 import { confirmDialogKey } from '~/composables/useConfirmDialog'
 import { useDark } from '~/composables/useDark'
 import { useLayoutEditMode } from '~/composables/useLayoutEditMode'
-import { BEWLY_MOUNTED, DRAWER_VIDEO_ENTER_PAGE_FULL, DRAWER_VIDEO_EXIT_PAGE_FULL, IFRAME_PAGE_SWITCH_BEWLY, IFRAME_PAGE_SWITCH_BILI, OVERLAY_SCROLL_BAR_SCROLL, OVERLAY_SCROLL_STATE_CHANGE } from '~/constants/globalEvents'
+import { BEWLY_MOUNTED, DRAWER_VIDEO_ENTER_PAGE_FULL, DRAWER_VIDEO_EXIT_PAGE_FULL, IFRAME_PAGE_SWITCH_BEWLY, IFRAME_PAGE_SWITCH_BILI, IFRAME_SEARCH_NAVIGATION, OVERLAY_SCROLL_BAR_SCROLL, OVERLAY_SCROLL_STATE_CHANGE } from '~/constants/globalEvents'
+import { isOriginalMomentsFeed } from '~/contentScripts/features/originalMomentsFeed'
 import { installScrollBridge } from '~/contentScripts/features/scrollBridge'
 import { HomeSubPage } from '~/contentScripts/views/Home/types'
 import { AppPage } from '~/enums/appEnums'
@@ -23,19 +25,17 @@ import type { DockItem } from '~/stores/mainStore'
 import { useMainStore } from '~/stores/mainStore'
 import { useSettingsStore } from '~/stores/settingsStore'
 import { useTopBarStore } from '~/stores/topBarStore'
+import { stripBilibiliLocalePathname } from '~/utils/bilibiliLocale'
 import { setOriginalBilibiliTopBarScrolled } from '~/utils/bilibiliTopBar'
 import { isKeyboardInput } from '~/utils/keyboard'
 import { isHomePage, isInIframe, isNotificationPage, isSearchResultsPage, isVideoOrBangumiPage, openLinkToNewTab, queryDomUntilFound, scrollToTop } from '~/utils/main'
 import emitter from '~/utils/mitt'
+import { navigateToPluginSearchResults } from '~/utils/searchNavigation'
 import { applyPendingSettingsMigrations, formatSettingsMigrationConfirmMessage, getPendingSettingsMigrationChoices, hasPendingSettingsMigrations } from '~/utils/settingsMigration'
 import { isComponentVisible } from '~/utils/topBarBadge'
+import { canOpenInVideoDialog } from '~/utils/videoDialog'
 
 import { setupNecessarySettingsWatchers } from './necessarySettingsWatchers'
-
-// Check if current page is festival page
-function isFestivalPage(): boolean {
-  return /https?:\/\/(?:www\.)?bilibili\.com\/festival\/.*/.test(document.URL)
-}
 
 const mainStore = useMainStore()
 const settingsStore = useSettingsStore()
@@ -61,6 +61,7 @@ const searchFocusOverlayActive = ref(false)
 const pageWallpaperReady = ref(false)
 const useBlendedPageControls = computed(() => settings.value.enableFrostedGlass
   && settings.value.frostedGlassBlurIntensity > 0
+  && !settings.value.disableBackground
   && (pageWallpaperReady.value || (settings.value.useLinearGradientThemeColorBackground && isDark.value)))
 
 function openSettings(target?: SettingsNavigationTarget) {
@@ -224,7 +225,11 @@ function getPageParam(): AppPage | null {
   return null
 }
 
-const activatedPage = ref<AppPage>(getPageParam() || (settings.value.dockItemsConfig.find(e => e.visible === true)?.page || AppPage.Home))
+function getDefaultAppPage(): AppPage {
+  return settings.value.dockItemsConfig.find(e => e.visible === true)?.page || AppPage.Home
+}
+
+const activatedPage = ref<AppPage>(getPageParam() || getDefaultAppPage())
 const pageControlWallpaperMask = computed(() => {
   if (!pageWallpaperReady.value)
     return '0%'
@@ -386,7 +391,7 @@ function isLayoutEditCandidateVisible(element: HTMLElement) {
 }
 
 function isOriginalMomentsFeedPage() {
-  return window.location.hostname === 't.bilibili.com' && /^\/?$/.test(window.location.pathname)
+  return isOriginalMomentsFeed()
 }
 
 function refreshLayoutEditTargets() {
@@ -704,7 +709,7 @@ const layoutEditContextActions = computed<LayoutEditQuickSettingsAction[]>(() =>
         icon: 'mingcute:settings-3-line',
         menu: 'BewlyComponents',
         secondaryPage: 'topbar',
-        targetTitleKey: 'settings.auto_hide_top_bar',
+        targetTitleKey: 'settings.video_page_top_bar_config',
       },
     ]
   }
@@ -992,6 +997,8 @@ useEventListener(window, 'resize', scheduleLayoutEditTargetsRefresh)
 useEventListener(window, 'scroll', scheduleLayoutEditTargetsRefresh, { passive: true })
 onUnmounted(stopLayoutEditTargetObserver)
 const scrollViewportRef = ref<HTMLElement | null>(null)
+// Firefox 原生滚动条无法自定义外观，仅 Firefox 包提供可选的重绘滚动条
+const useFirefoxScrollbar = computed(() => isFirefoxBuild && settings.value.enableFirefoxScrollbarRepaint)
 watch(scrollViewportRef, (viewport, _previousViewport, onCleanup) => {
   if (viewport && isHomePage() && !settings.value.useOriginalBilibiliHomepage)
     onCleanup(installScrollBridge(viewport))
@@ -1012,7 +1019,7 @@ const canRefreshHomeSubPage = ref<boolean>(false)
 // 使用新的枚举状态管理撤销/前进按钮
 const undoForwardState = ref<UndoForwardState>(UndoForwardState.Hidden)
 const canRefreshCurrentPage = computed((): boolean => {
-  return activatedPage.value !== AppPage.Home || homeActivatedPage.value === HomeSubPage.ForYou || canRefreshHomeSubPage.value
+  return activatedPage.value !== AppPage.Home || homeActivatedPage.value !== HomeSubPage.Following || canRefreshHomeSubPage.value
 })
 let refreshScrollTimer: ReturnType<typeof setTimeout> | undefined
 
@@ -1085,6 +1092,9 @@ watch(isHomeTabSwitching, (switching) => {
 
 const iframeDrawerURL = ref<string>('')
 const showIframeDrawer = ref<boolean>(false)
+// 每次打开分配新 id，替换已打开的弹窗时重新挂载 iframe
+const videoDialog = ref<{ id: number, url: string } | null>(null)
+let videoDialogId = 0
 
 // 添加活跃抽屉状态管理
 const activeDrawer = ref<DrawerType>(DrawerType.None)
@@ -1096,6 +1106,25 @@ function setActiveDrawer(drawer: DrawerType) {
 const hideUIForIframePhotoViewer = ref<boolean>(false)
 
 const iframePageRef = ref()
+// 只接受当前 Bewly 界面持有的 iframe 请求；消息仅携带关键词，不接受任意跳转 URL。
+useEventListener(window, 'message', ({ data, source, origin }) => {
+  if (data?.type !== IFRAME_SEARCH_NAVIGATION || typeof data.keyword !== 'string' || !data.keyword.trim())
+    return
+
+  const frames = document.getElementById('bewly')?.shadowRoot?.querySelectorAll<HTMLIFrameElement>('iframe')
+  const frame = Array.from(frames ?? []).find(iframe => iframe.contentWindow === source)
+  if (!frame)
+    return
+  try {
+    if (new URL(frame.src).origin !== origin || !/^https?:\/\/(?:[\w-]+\.)?bilibili\.com$/.test(origin))
+      return
+  }
+  catch {
+    return
+  }
+
+  navigateToPluginSearchResults(data.keyword)
+})
 useEventListener(window, 'message', ({ data, source }) => {
   if (typeof data !== 'string')
     return
@@ -1135,61 +1164,6 @@ useEventListener(window, 'message', ({ data, source }) => {
   }
 })
 
-// 监听来自父页面的黑暗模式切换消息（用于iframe跨域场景）
-useEventListener(window, 'message', ({ data, source }) => {
-  // 只处理来自父窗口的消息
-  if (source !== window.parent)
-    return
-
-  if (!data || typeof data !== 'object' || Array.isArray(data))
-    return
-
-  const { type, isDark, darkModeBaseColor } = data
-
-  if (type === 'iframeDarkModeChange') {
-    // 在iframe环境中，只更新DOM样式，不修改用户的主题设置
-    // 避免覆盖用户选择的设备或定时主题模式
-    if (isInIframe()) {
-      // Check if we should apply selective dark mode (plugin UI only) on festival pages
-      const isSelectiveDark = isFestivalPage()
-
-      // 立即更新DOM样式，不修改settings.value.theme
-      if (isDark) {
-        // Always apply to plugin container
-        document.querySelector('#bewly')?.classList.add('dark')
-
-        // Only apply global styles if not on festival pages
-        if (!isSelectiveDark) {
-          document.documentElement.classList.add('dark')
-          document.body?.classList.add('dark')
-        }
-
-        // 如果提供了深色模式基准颜色，则应用它（仅应用到DOM，不修改设置）
-        if (darkModeBaseColor) {
-          document.documentElement.style.setProperty('--bew-dark-base-color', darkModeBaseColor)
-          // 对于Shadow DOM也需要设置
-          const bewlyContainer = document.getElementById('bewly')
-          if (bewlyContainer?.shadowRoot) {
-            const shadowHost = bewlyContainer
-            shadowHost.style.setProperty('--bew-dark-base-color', darkModeBaseColor)
-          }
-        }
-      }
-      else {
-        document.querySelector('#bewly')?.classList?.remove('dark')
-
-        // Only remove global classes if not in selective mode
-        if (!isSelectiveDark) {
-          document.documentElement.classList.remove('dark')
-          document.body?.classList.remove('dark')
-        }
-      }
-
-      // 强制重新计算样式
-      void document.documentElement.offsetHeight
-    }
-  }
-}, { passive: true })
 const iframePageURL = computed((): string => {
   // If the iframe is not the BiliBili homepage or in iframe, then don't show the iframe page
   if (!isHomePage(window.self.location.href) || isInIframe())
@@ -1307,8 +1281,17 @@ function focusScrollViewport(options: { force?: boolean } = {}) {
 const isFirstTimeActivatedPageChange = ref<boolean>(true)
 function syncNavigationUrl() {
   const url = new URL(window.location.href)
-  url.searchParams.set('page', activatedPage.value)
-  if (activatedPage.value === AppPage.Home)
+  // 停留在默认首页及默认标签时不写入参数，切换后再记录 page/tab。
+  const keepTab = activatedPage.value === AppPage.Home
+    && homeActivatedPage.value !== getDefaultHomeSubPage(settings.value.homePageTabVisibilityList)
+  const keepPage = keepTab
+    || activatedPage.value !== AppPage.Home
+    || getDefaultAppPage() !== AppPage.Home
+  if (keepPage)
+    url.searchParams.set('page', activatedPage.value)
+  else
+    url.searchParams.delete('page')
+  if (keepTab)
     url.searchParams.set('tab', homeActivatedPage.value)
   else
     url.searchParams.delete('tab')
@@ -1328,7 +1311,9 @@ watch(
       syncNavigationUrl()
     }
 
-    scrollViewportRef.value?.scrollTo({ top: 0 })
+    const viewport = scrollViewportRef.value
+    if (viewport)
+      jumpScrollTo(viewport, 0)
     focusScrollViewport()
     isFirstTimeActivatedPageChange.value = false
   },
@@ -1507,6 +1492,14 @@ function handleBackToTop(targetScrollTop = 0 as number) {
   iframePageRef.value?.handleBackToTop()
 }
 
+function handleScrollJump(targetScrollTop = 0 as number) {
+  const viewport = scrollViewportRef.value
+  if (viewport) {
+    jumpScrollTo(viewport, targetScrollTop)
+    topBarRef.value?.toggleTopBarVisible(true)
+  }
+}
+
 // 添加滚动结束检测
 let scrollEndTimer: ReturnType<typeof setTimeout> | null = null
 let scrollStateTimer: ReturnType<typeof setTimeout> | null = null
@@ -1635,12 +1628,31 @@ function openIframeDrawer(url: string) {
   showIframeDrawer.value = true
 }
 
+function openVideoDialog(url: string) {
+  if (!canOpenInVideoDialog(url)) {
+    openLinkToNewTab(url)
+    return
+  }
+
+  videoDialog.value = { id: ++videoDialogId, url }
+}
+
 /**
  * Checks if the current viewport has a scrollbar.
  * @returns {Promise<boolean>} Returns true if the viewport has a scrollbar, false otherwise.
  */
 async function haveScrollbar() {
   await nextTick()
+  // Read after the browser has laid out the newly rendered cards; reading right
+  // after the Vue flush forced that layout synchronously after every page load.
+  // Hidden tabs do not run animation frames, so a timeout keeps loading going.
+  await new Promise<void>((resolve) => {
+    const fallback = window.setTimeout(resolve, 100)
+    requestAnimationFrame(() => setTimeout(() => {
+      window.clearTimeout(fallback)
+      resolve()
+    }, 0))
+  })
   const viewport = scrollViewportRef.value
   if (!viewport)
     return false
@@ -1692,13 +1704,16 @@ provide<BewlyAppProvider>('BEWLY_APP', {
   scrollTop,
   searchFocusOverlayActive,
   handleBackToTop,
+  handleScrollJump,
   handlePageRefresh,
+  refreshCurrentPage: handleThrottledPageRefresh,
   canRefreshHomeSubPage,
   handleReachBottom,
   handleUndoRefresh,
   handleForwardRefresh,
   undoForwardState,
   openIframeDrawer,
+  openVideoDialog,
   haveScrollbar,
   activeDrawer,
   setActiveDrawer,
@@ -1772,7 +1787,7 @@ if (settings.value.cleanUrlArgument) {
         }
       }
       const hostname = currentUrl.hostname
-      if ((hostname === 'bilibili.com' || hostname.endsWith('.bilibili.com')) && currentUrl.pathname.startsWith('/video/')) {
+      if ((hostname === 'bilibili.com' || hostname.endsWith('.bilibili.com')) && stripBilibiliLocalePathname(currentUrl.pathname).startsWith('/video/')) {
         for (const param of VIDEO_ONLY_PARAMS_TO_REMOVE) {
           if (currentUrl.searchParams.has(param)) {
             currentUrl.searchParams.delete(param)
@@ -1877,6 +1892,7 @@ if (settings.value.cleanUrlArgument) {
     :class="{
       'dark': isDark,
       'bewly-wrapper--viewport': isHomePage() && !settings.useOriginalBilibiliHomepage,
+      [SELECTION_FALLBACK_CLASS]: !supportsHighlightInheritance(),
     }"
     text="$bew-text-1"
     @pointerdown.capture="blockOriginalLayoutInteraction"
@@ -1887,7 +1903,7 @@ if (settings.value.cleanUrlArgument) {
     @scroll.capture.passive="scheduleLayoutEditTargetsRefresh"
   >
     <!-- Background -->
-    <template v-if="showBewlyPage">
+    <template v-if="showBewlyPage && !settings.disableBackground">
       <AppBackground :activated-page="activatedPage" @wallpaper-ready="pageWallpaperReady = $event" />
     </template>
 
@@ -2103,8 +2119,15 @@ if (settings.value.cleanUrlArgument) {
           <div
             ref="scrollViewportRef"
             class="bewly-scroll-viewport bew-page-controls"
-            :class="{ 'bew-page-controls--blend': useBlendedPageControls }"
-            :style="{ '--bew-control-wallpaper-mask': pageControlWallpaperMask }"
+            :class="{
+              'bew-page-controls--blend': useBlendedPageControls,
+              'bewly-scroll-viewport--repainted-scrollbar': useFirefoxScrollbar,
+            }"
+            :style="{
+              '--bew-control-wallpaper-mask': pageControlWallpaperMask,
+              // 视频弹窗打开时锁定背后列表，避免弹窗内滚轮与方向键越界滚动
+              'overflowY': videoDialog ? 'hidden' : undefined,
+            }"
             h-inherit of-y-auto of-x-hidden
             tabindex="-1"
             style="overscroll-behavior: contain;"
@@ -2131,6 +2154,7 @@ if (settings.value.cleanUrlArgument) {
           </div>
         </template>
       </Transition>
+      <FirefoxScrollbar v-if="useFirefoxScrollbar && showBewlyPage" :target="scrollViewportRef" />
 
       <Transition v-if="!showBewlyPage && iframePageURL && !isInIframe()" name="fade">
         <IframePage ref="iframePageRef" :url="iframePageURL" @scroll="topBarRef?.handleScroll($event)" />
@@ -2141,6 +2165,13 @@ if (settings.value.cleanUrlArgument) {
       v-if="showIframeDrawer"
       :url="iframeDrawerURL"
       @close="showIframeDrawer = false"
+    />
+
+    <VideoDialog
+      v-if="videoDialog"
+      :key="videoDialog.id"
+      :url="videoDialog.url"
+      @close="videoDialog = null"
     />
 
     <!-- Static confirm overlay: no Transition/Teleport (see finishConfirmDialog). -->
@@ -2501,5 +2532,9 @@ if (settings.value.cleanUrlArgument) {
 .bewly-scroll-viewport {
   outline: none;
   scrollbar-gutter: stable;
+}
+
+.bewly-scroll-viewport--repainted-scrollbar {
+  scrollbar-width: none;
 }
 </style>

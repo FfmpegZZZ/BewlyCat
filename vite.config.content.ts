@@ -1,8 +1,11 @@
+import { readdirSync } from 'node:fs'
+
 import UnoCSS from 'unocss/vite'
 import type { Plugin } from 'vite'
 import { defineConfig } from 'vite'
 
 import packageJson from './package.json'
+import { thirdPartyLicensesVitePlugin } from './scripts/thirdPartyLicenses'
 import { isDev, isFirefox, isSafari, r } from './scripts/utils'
 import { sharedConfig } from './vite.config'
 
@@ -38,6 +41,22 @@ function embedContentScriptStyles(): Plugin {
   }
 }
 
+// unplugin-vue-i18n 的虚拟 messages 模块直接读取并内联 locale 文件，不会登记为监听文件；
+// 构建监听模式下改动翻译不会触发重建，这里补登记，配合关闭的 Rollup 缓存重新生成翻译。
+function watchLocaleFiles(): Plugin {
+  const localesDir = r('src/_locales')
+  return {
+    name: 'watch-locale-files',
+    apply: 'build',
+    buildStart() {
+      if (!this.meta.watchMode)
+        return
+      for (const fileName of readdirSync(localesDir).filter(name => /\.ya?ml$/.test(name)))
+        this.addWatchFile(r('src/_locales', fileName))
+    },
+  }
+}
+
 // bundling the content script using Vite
 export default defineConfig({
   ...sharedConfig,
@@ -45,6 +64,8 @@ export default defineConfig({
     UnoCSS(),
     ...sharedConfig.plugins!,
     embedContentScriptStyles(),
+    watchLocaleFiles(),
+    thirdPartyLicensesVitePlugin('content'),
   ],
   build: {
     watch: isDev

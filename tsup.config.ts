@@ -3,12 +3,16 @@
 // import fs from 'fs-extra'
 import { defineConfig } from 'tsup'
 
+import { thirdPartyLicensesEsbuildPlugin } from './scripts/thirdPartyLicenses'
 import { buildCommit, isDev, isFirefox, isSafari } from './scripts/utils'
 
 const outDir = isFirefox ? 'extension-firefox/dist' : isSafari ? 'extension-safari/dist' : 'extension/dist'
 
 export default defineConfig(() => ({
   entry: {
+    'contentScripts/listenVideoControl': './src/contentScripts/listenVideoControl.ts',
+    'contentScripts/hlsPlayer': './src/contentScripts/hlsPlayer.ts',
+    'contentScripts/flvPlayer': './src/contentScripts/flvPlayer.ts',
     'background/index': './src/background/index.ts',
     'contentScripts/pageLoading': './src/contentScripts/pageLoading.ts',
   },

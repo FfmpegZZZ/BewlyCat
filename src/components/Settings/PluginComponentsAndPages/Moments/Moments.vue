@@ -4,8 +4,11 @@ import { useI18n } from 'vue-i18n'
 import Input from '~/components/Input.vue'
 import Radio from '~/components/Radio.vue'
 import Select from '~/components/Select.vue'
+import { useConfirmDialog } from '~/composables/useConfirmDialog'
+import type { MomentTypeFilterSetting } from '~/constants/momentFilters'
+import { MOMENT_TYPE_FILTER_OPTIONS } from '~/constants/momentFilters'
 import { settings } from '~/logic'
-import type { TabsPosition } from '~/logic/storage'
+import type { MomentsGridColumns, TabsPosition } from '~/logic/storage'
 
 import SettingsItem from '../../components/SettingsItem.vue'
 import SettingsItemGroup from '../../components/SettingsItemGroup.vue'
@@ -14,6 +17,7 @@ import SettingsToggleTag from '../../components/SettingsToggleTag.vue'
 import WantedUsersManager from './WantedUsersManager.vue'
 
 const { t } = useI18n()
+const { confirm: showConfirmDialog } = useConfirmDialog()
 
 type MomentToggleSetting
   = | 'originalMomentsShowUserCard'
@@ -26,53 +30,36 @@ type MomentToggleSetting
     | 'momentsSidebarShowLive'
     | 'momentsSidebarShowHotSearch'
     | 'momentsShowUpList'
-    | 'momentsFilterUpRecommendation'
-    | 'momentsHideChargeExclusive'
-    | 'momentsHideVideoReservation'
-    | 'momentsHideLiveReservation'
-    | 'momentsHideLiveDynamics'
-    | 'momentsHideVideoDynamics'
-    | 'momentsHideDrawDynamics'
-    | 'momentsHideUgcSeasonDynamics'
-    | 'momentsHideForwardDynamics'
-    | 'momentsHidePgcDynamics'
-    | 'momentsHideArticleDynamics'
+    | MomentTypeFilterSetting
 
 interface MomentTagOption {
   setting: MomentToggleSetting
   label: string
+  labelKey?: string
   icon: string
 }
 
 const originalComponentOptions = computed<MomentTagOption[]>(() => [
-  { setting: 'originalMomentsShowUserCard', label: t('settings.original_moments_show_user_card'), icon: 'i-tabler-user-square-rounded' },
+  { setting: 'originalMomentsShowUserCard', label: t('settings.original_moments_show_user_card'), labelKey: 'settings.original_moments_show_user_card', icon: 'i-tabler-user-square-rounded' },
   { setting: 'originalMomentsShowLiveList', label: t('settings.original_moments_show_live_list'), icon: 'i-tabler-live-photo' },
   { setting: 'originalMomentsShowCommunityCenter', label: t('settings.original_moments_show_community_center'), icon: 'i-tabler-layout-dashboard' },
-  { setting: 'originalMomentsShowHotSearch', label: t('settings.original_moments_show_hot_search'), icon: 'i-tabler-flame' },
+  { setting: 'originalMomentsShowHotSearch', label: t('settings.original_moments_show_hot_search'), labelKey: 'settings.original_moments_show_hot_search', icon: 'i-tabler-flame' },
   { setting: 'originalMomentsShowUpList', label: t('settings.original_moments_show_up_list'), icon: 'i-tabler-users' },
 ])
 
 const pluginComponentOptions = computed<MomentTagOption[]>(() => [
-  { setting: 'momentsSidebarShowUserCard', label: t('settings.moments_show_user_card'), icon: 'i-tabler-user-square-rounded' },
+  { setting: 'momentsSidebarShowUserCard', label: t('settings.moments_show_user_card'), labelKey: 'settings.moments_show_user_card', icon: 'i-tabler-user-square-rounded' },
   { setting: 'momentsSidebarShowPublish', label: t('settings.moments_show_publish'), icon: 'i-tabler-edit' },
   { setting: 'momentsSidebarShowLive', label: t('settings.moments_show_live'), icon: 'i-tabler-live-photo' },
-  { setting: 'momentsSidebarShowHotSearch', label: t('settings.moments_show_hot_search'), icon: 'i-tabler-flame' },
+  { setting: 'momentsSidebarShowHotSearch', label: t('settings.moments_show_hot_search'), labelKey: 'settings.moments_show_hot_search', icon: 'i-tabler-flame' },
   { setting: 'momentsShowUpList', label: t('settings.moments_show_up_list'), icon: 'i-tabler-users' },
 ])
 
-const pluginFilterOptions = computed<MomentTagOption[]>(() => [
-  { setting: 'momentsHideVideoDynamics', label: t('settings.moments_filter_video_dynamic'), icon: 'i-tabler-player-play' },
-  { setting: 'momentsHideDrawDynamics', label: t('settings.moments_filter_draw_dynamic'), icon: 'i-tabler-photo' },
-  { setting: 'momentsHideUgcSeasonDynamics', label: t('settings.moments_filter_ugc_season_dynamic'), icon: 'i-tabler-stack' },
-  { setting: 'momentsHideForwardDynamics', label: t('settings.moments_filter_forward_dynamic'), icon: 'i-tabler-repeat' },
-  { setting: 'momentsHidePgcDynamics', label: t('settings.moments_filter_pgc_dynamic'), icon: 'i-tabler-device-tv' },
-  { setting: 'momentsHideArticleDynamics', label: t('settings.moments_filter_article_dynamic'), icon: 'i-tabler-news' },
-  { setting: 'momentsFilterUpRecommendation', label: t('settings.moments_filter_up_recommendation_short'), icon: 'i-tabler-sparkles' },
-  { setting: 'momentsHideChargeExclusive', label: t('settings.moments_filter_charge_dynamic'), icon: 'i-tabler-battery-charging' },
-  { setting: 'momentsHideVideoReservation', label: t('settings.moments_filter_video_reservation'), icon: 'i-tabler-calendar-time' },
-  { setting: 'momentsHideLiveReservation', label: t('settings.moments_filter_live_reservation'), icon: 'i-tabler-calendar-event' },
-  { setting: 'momentsHideLiveDynamics', label: t('settings.moments_filter_live_dynamic'), icon: 'i-tabler-broadcast' },
-])
+const pluginFilterOptions = computed<MomentTagOption[]>(() => MOMENT_TYPE_FILTER_OPTIONS.map(option => ({
+  setting: option.setting,
+  label: t(option.labelKey),
+  icon: option.icon,
+})))
 
 const openModeOptions = computed(() => [
   {
@@ -112,10 +99,28 @@ const videoCardOpenModeOptions = computed(() => [
   },
 ])
 
-const gridColumnOptions = computed(() => [
-  { label: t('settings.moments_grid_columns_option', { count: 2 }), value: '2' as const },
-  { label: t('settings.moments_grid_columns_option', { count: 1 }), value: '1' as const },
+// 3、4 列未做适配，需确认后才展开
+const moreGridColumnsUnlocked = ref(settings.value.momentsGridColumns === '3' || settings.value.momentsGridColumns === '4')
+
+const gridColumnOptions = computed<{ label: string, value: MomentsGridColumns | 'more' }[]>(() => [
+  { label: t('settings.moments_grid_columns_option', { count: 2 }), value: '2' },
+  { label: t('settings.moments_grid_columns_option', { count: 1 }), value: '1' },
+  ...moreGridColumnsUnlocked.value
+    ? [
+        { label: t('settings.moments_grid_columns_option', { count: 3 }), value: '3' as const },
+        { label: t('settings.moments_grid_columns_option', { count: 4 }), value: '4' as const },
+      ]
+    : [{ label: t('settings.moments_grid_columns_more'), value: 'more' as const }],
 ])
+
+async function selectGridColumns(value: MomentsGridColumns | 'more') {
+  if (value !== 'more') {
+    settings.value.momentsGridColumns = value
+    return
+  }
+  if (await showConfirmDialog(t('settings.moments_grid_columns_more_confirm'), { title: t('settings.moments_grid_columns') }))
+    moreGridColumnsUnlocked.value = true
+}
 
 const momentsTabsPositionOptions = computed<{ label: string, value: TabsPosition }[]>(() => [
   { label: t('common.position.left'), value: 'left' },
@@ -125,25 +130,6 @@ const momentsTabsPositionOptions = computed<{ label: string, value: TabsPosition
 
 <template>
   <div>
-    <SettingsItemGroup :title="$t('settings.group_original_moments_page')">
-      <SettingsItem
-        :title="$t('settings.moments_visible_components')"
-        :desc="$t('settings.moments_visible_components_original_desc')"
-      >
-        <template #bottom>
-          <div class="moment-setting-tags" role="group" :aria-label="$t('settings.moments_visible_components')">
-            <SettingsToggleTag
-              v-for="option in originalComponentOptions"
-              :key="option.setting"
-              v-model="settings[option.setting]"
-              :label="option.label"
-              :icon="option.icon"
-            />
-          </div>
-        </template>
-      </SettingsItem>
-    </SettingsItemGroup>
-
     <SettingsItemGroup
       :title="$t('settings.group_new_moments_page')"
       :desc="$t('settings.group_new_moments_page_desc')"
@@ -161,6 +147,7 @@ const momentsTabsPositionOptions = computed<{ label: string, value: TabsPosition
               v-model="settings[option.setting]"
               :label="option.label"
               :icon="option.icon"
+              :data-settings-key="option.labelKey"
             />
           </div>
         </template>
@@ -171,9 +158,10 @@ const momentsTabsPositionOptions = computed<{ label: string, value: TabsPosition
         right-width="auto"
       >
         <SettingsSegmentedControl
-          v-model="settings.momentsGridColumns"
+          :model-value="settings.momentsGridColumns"
           :label="$t('settings.moments_grid_columns')"
           :options="gridColumnOptions"
+          @update:model-value="selectGridColumns"
         />
       </SettingsItem>
       <SettingsItem :title="$t('settings.moments_tabs_position')" right-width="auto">
@@ -182,6 +170,13 @@ const momentsTabsPositionOptions = computed<{ label: string, value: TabsPosition
           :label="$t('settings.moments_tabs_position')"
           :options="momentsTabsPositionOptions"
         />
+      </SettingsItem>
+      <SettingsItem
+        :title="$t('settings.moments_start_from_last_seen')"
+        :desc="$t('settings.moments_start_from_last_seen_desc')"
+        right-width="auto"
+      >
+        <Radio v-model="settings.momentsStartFromLastSeen" />
       </SettingsItem>
       <SettingsItem
         :title="$t('settings.moments_enable_live_preview')"
@@ -240,6 +235,13 @@ const momentsTabsPositionOptions = computed<{ label: string, value: TabsPosition
     </SettingsItemGroup>
 
     <SettingsItemGroup :title="$t('settings.group_moments_filters')">
+      <SettingsItem
+        :title="$t('settings.moments_show_filter_entry')"
+        :desc="$t('settings.moments_show_filter_entry_desc')"
+        right-width="auto"
+      >
+        <Radio v-model="settings.momentsShowFilterEntry" />
+      </SettingsItem>
       <SettingsItem
         :title="$t('settings.moments_filtered_types')"
         :desc="$t('settings.moments_filtered_types_desc')"
@@ -313,6 +315,41 @@ const momentsTabsPositionOptions = computed<{ label: string, value: TabsPosition
         <template #bottom>
           <WantedUsersManager mode="pinned" />
         </template>
+      </SettingsItem>
+    </SettingsItemGroup>
+
+    <!-- 这一组只作用于 B 站原版动态页，放在最后，插件动态页的常用设置排在前面。 -->
+    <SettingsItemGroup :title="$t('settings.group_original_moments_page')">
+      <SettingsItem
+        :title="$t('settings.moments_visible_components')"
+        :desc="$t('settings.moments_visible_components_original_desc')"
+      >
+        <template #bottom>
+          <div class="moment-setting-tags" role="group" :aria-label="$t('settings.moments_visible_components')">
+            <SettingsToggleTag
+              v-for="option in originalComponentOptions"
+              :key="option.setting"
+              v-model="settings[option.setting]"
+              :label="option.label"
+              :icon="option.icon"
+              :data-settings-key="option.labelKey"
+            />
+          </div>
+        </template>
+      </SettingsItem>
+      <SettingsItem
+        :title="$t('settings.original_moments_show_fold_comments_button')"
+        :desc="$t('settings.original_moments_show_fold_comments_button_desc')"
+        right-width="auto"
+      >
+        <Radio v-model="settings.originalMomentsShowFoldCommentsButton" />
+      </SettingsItem>
+      <SettingsItem
+        :title="$t('settings.original_moments_click_blank_to_fold_comments')"
+        :desc="$t('settings.original_moments_click_blank_to_fold_comments_desc')"
+        right-width="auto"
+      >
+        <Radio v-model="settings.originalMomentsClickBlankToFoldComments" />
       </SettingsItem>
     </SettingsItemGroup>
   </div>

@@ -5,6 +5,7 @@ import type { Video } from '~/components/VideoCard/types'
 import VideoCardGrid from '~/components/VideoCardGrid.vue'
 import { useBewlyApp } from '~/composables/useAppProvider'
 import { useHomeTabState } from '~/composables/useHomeTabState'
+import { VideoPageTopBarConfig } from '~/enums/appEnums'
 import type { GridLayoutType } from '~/logic'
 import { settings } from '~/logic'
 import type { List as RankingVideoItem, RankingResult } from '~/models/video/ranking'
@@ -13,6 +14,7 @@ import api from '~/utils/api'
 import { getListGridColumnCount } from '~/utils/gridLayout'
 import { decodeHtmlEntities } from '~/utils/htmlDecode'
 
+import { getHomeContentScrollTop } from '../homeScroll'
 import type { RankingType } from '../types'
 
 // 扩展 RankingVideoItem 以包含预处理的显示数据
@@ -31,7 +33,7 @@ const emit = defineEmits<{
 }>()
 
 const { t } = useI18n()
-const { handleBackToTop, handleReachBottom, handlePageRefresh } = useBewlyApp()
+const { handleScrollJump, handleReachBottom, handlePageRefresh } = useBewlyApp()
 
 const rankingTypes = computed((): RankingType[] => {
   return [
@@ -136,6 +138,7 @@ function transformRankingVideo(item: RankingVideoItem, rank: number): Video {
     likeStr: (item.stat as any)?.like_str ?? item.stat.like,
     publishedTimestamp: item.pubdate,
     bvid: item.bvid,
+    category: item.tname || undefined,
     rank,
     cid: item.cid,
     threePointV2: [],
@@ -146,7 +149,7 @@ watch(() => activatedRankingType.value.id, () => {
   if (!tabState.isCurrent())
     return
 
-  handleBackToTop(settings.value.useSearchPageModeOnHomePage ? 510 : 0)
+  handleScrollJump(getHomeContentScrollTop())
 
   initData()
 })
@@ -154,10 +157,10 @@ watch(() => activatedRankingType.value.id, () => {
 watch(() => props.topBarVisibility, () => {
   shouldMoveAsideUp.value = false
 
-  // Allow moving tabs up only when the top bar is not hidden & is set to auto-hide
+  // Allow moving tabs up only when the top bar is not hidden & is set to auto-hide (on scroll or on hover)
   // This feature is primarily designed to compatible with the Bilibili Evolved's top bar
   // Even when the BewlyBewly top bar is hidden, the Bilibili Evolved top bar still exists, so not moving up
-  if (settings.value.autoHideTopBar && settings.value.enableTopBar) {
+  if (settings.value.otherPageTopBarConfig !== VideoPageTopBarConfig.AlwaysShow && settings.value.enableTopBar) {
     if (props.topBarVisibility)
       shouldMoveAsideUp.value = false
 
@@ -287,6 +290,14 @@ async function getRankingPgc(version: number, selectionId: number, seasonType: n
 }
 
 defineExpose({ initData })
+
+function getItemDisplayData(item: RankingVideoElement) {
+  return item.displayData
+}
+
+function getItemKey(item: RankingVideoElement) {
+  return item.aid
+}
 </script>
 
 <template>
@@ -321,8 +332,8 @@ defineExpose({ initData })
           :grid-layout="gridLayout"
           :loading="isLoading"
           :no-more-content="noMoreContent"
-          :transform-item="(item: RankingVideoElement) => item.displayData"
-          :get-item-key="(item: RankingVideoElement) => item.aid"
+          :transform-item="getItemDisplayData"
+          :get-item-key="getItemKey"
           show-preview
           @refresh="initData"
           @load-more="() => {}"

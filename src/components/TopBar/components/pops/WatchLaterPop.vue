@@ -4,15 +4,18 @@ import { storeToRefs } from 'pinia'
 import Empty from '~/components/Empty.vue'
 import Loading from '~/components/Loading.vue'
 import Progress from '~/components/Progress.vue'
-import Tooltip from '~/components/Tooltip.vue'
 import { getAuthorJumpUrl } from '~/components/VideoCard/utils'
 import { useOptimizedScroll } from '~/composables/useOptimizedScroll'
 import { settings } from '~/logic'
+import type { List as WatchLaterItem } from '~/models/video/watchLater'
 import { useTopBarStore } from '~/stores/topBarStore'
 import { calcCurrentTime } from '~/utils/dataFormatter'
 import { isActualHomepage, isHomePage, isInIframe, removeHttpFromUrl } from '~/utils/main'
 import { openLinkInBackground } from '~/utils/tabs'
 import { getWatchLaterAuthor } from '~/utils/watchLater'
+
+import PopCoverIconButton from './PopCoverIconButton.vue'
+import PopMediaCard from './PopMediaCard.vue'
 
 const emit = defineEmits<{ addOpenTabs: [] }>()
 
@@ -26,6 +29,24 @@ const playAllUrl = computed((): string => {
 })
 
 const scrollContainer = ref<HTMLElement>()
+
+/**
+ * 删除遮罩状态：removing 删除中，removed 已删除但保留原位可还原，restoring 还原中；
+ * index 为点击删除时在展示列表中的位置。点击即删除，误删由撤销兜底。
+ */
+type RemoveStatus = 'removing' | 'removed' | 'restoring'
+const removeStatuses = reactive(new Map<number, { item: WatchLaterItem, index: number, status: RemoveStatus }>())
+
+// store 删除后条目会从列表移除，这里按原位置插回以保留卡片
+const displayWatchLaterList = computed(() => {
+  const list = [...watchLaterList.value]
+  const entries = [...removeStatuses.values()].sort((a, b) => a.index - b.index)
+  for (const entry of entries) {
+    if (!list.some(item => item.aid === entry.item.aid))
+      list.splice(Math.min(entry.index, list.length), 0, entry.item)
+  }
+  return list
+})
 
 // 检查是否还有更多内容
 const hasMoreContent = computed(() => {
@@ -90,6 +111,60 @@ function deleteWatchLaterItem(index: number, aid: number) {
   topBarStore.deleteWatchLaterItem(index, aid)
 }
 
+// 点击即删除，卡片保留在原位并显示可撤销遮罩
+async function removeWatchLaterItem(item: WatchLaterItem, index: number) {
+  if (removeStatuses.has(item.aid))
+    return
+
+  const entry: { item: WatchLaterItem, index: number, status: RemoveStatus } = { item, index, status: 'removing' }
+  removeStatuses.set(item.aid, entry)
+  const success = await topBarStore.deleteWatchLaterItem(index, item.aid)
+  if (removeStatuses.get(item.aid) !== entry)
+    return
+  if (success)
+    entry.status = 'removed'
+  else
+    removeStatuses.delete(item.aid)
+}
+
+async function restoreWatchLaterItem(aid: number) {
+  const entry = removeStatuses.get(aid)
+  if (!entry || entry.status !== 'removed')
+    return
+
+  entry.status = 'restoring'
+  // 换算为 store 列表下标：只计算排在前面且仍在 store 列表中的条目
+  const storeAids = new Set(watchLaterList.value.map(item => item.aid))
+  const displayIndex = displayWatchLaterList.value.findIndex(item => item.aid === aid)
+  const storeIndex = displayWatchLaterList.value
+    .slice(0, Math.max(0, displayIndex))
+    .filter(item => storeAids.has(item.aid))
+    .length
+  const success = await topBarStore.restoreWatchLaterItem(entry.item, storeIndex)
+  if (removeStatuses.get(aid) !== entry)
+    return
+  if (success)
+    removeStatuses.delete(aid)
+  else
+    entry.status = 'removed'
+}
+
+/** progress = -1 表示已看完，直接展示总时长；角标文案形如「12:34 / 45:00」。 */
+function getProgressText(item: WatchLaterItem): string {
+  const played = item.progress === -1 ? item.duration : item.progress
+  return `${calcCurrentTime(played)} / ${calcCurrentTime(item.duration)}`
+}
+
+/** 封面条的宽度百分比；脏数据（缺时长）时回退为 0，避免 NaN%。 */
+function getProgressPercentage(item: WatchLaterItem): number {
+  if (!item.duration)
+    return 0
+  const percentage = (item.progress / item.duration) * 100
+  if (!Number.isFinite(percentage))
+    return 0
+  return Math.min(100, Math.max(0, percentage))
+}
+
 function handleOpenVideoPageAndRemove(index: number, aid: number, bvid: string) {
   openVideoPage(getVideoPageUrl(bvid))
   deleteWatchLaterItem(index, aid)
@@ -127,7 +202,7 @@ function handleOpenVideoPageAndRemove(index: number, aid: number, bvid: string) 
       <div flex="~ items-center gap-4 wrap">
         <button
           type="button"
-          class="watch-later-header-action"
+          class="watch-later-header-action bew-top-bar-pop-action"
           :disabled="isAddingOpenTabsToWatchLater"
           :aria-busy="isAddingOpenTabsToWatchLater"
           :title="$t('watch_later.add_open_tabs_hint')"
@@ -138,14 +213,14 @@ function handleOpenVideoPageAndRemove(index: number, aid: number, bvid: string) 
         <ALink
           :href="playAllUrl"
           type="topBar"
-          class="watch-later-header-action"
+          class="watch-later-header-action bew-top-bar-pop-action"
         >
           {{ $t('common.play_all') }}
         </ALink>
         <ALink
           :href="viewAllUrl"
           type="topBar"
-          class="watch-later-header-action"
+          class="watch-later-header-action bew-top-bar-pop-action"
         >
           {{ $t('common.view_all') }}
         </ALink>
@@ -171,140 +246,116 @@ function handleOpenVideoPageAndRemove(index: number, aid: number, bvid: string) 
 
       <!-- empty -->
       <Empty
-        v-if="!isLoadingWatchLater && watchLaterList.length === 0"
+        v-if="!isLoadingWatchLater && displayWatchLaterList.length === 0"
         w="full" flex-1
         flex="~ items-center"
       />
 
-      <!-- watchlater -->
-      <TransitionGroup name="list">
+      <!-- watchlater：卡片结构与收藏/动态弹窗视频卡保持一致，特有操作作为封面覆盖层 -->
+      <TransitionGroup name="removable-list" tag="div" class="removable-list-group" flex="~ col gap-2">
         <ALink
-          v-for="(item, index) in watchLaterList"
+          v-for="(item, index) in displayWatchLaterList"
           :key="item.aid"
           :href="getWatchLaterVideoUrl(item.bvid)"
           class="group bew-content-card"
+          pos="relative"
           type="topBar"
-          m="last:b-4" p="2"
+          block
+          m="last:b-4"
+          p="2"
           hover:bg="$bew-fill-2"
           duration-300
         >
-          <section flex="~ gap-4 items-start">
-            <!-- Video cover, live cover, ariticle cover -->
-            <div
-              class="bew-top-bar-media-column"
-              bg="$bew-skeleton"
-              pos="relative"
-            >
+          <PopMediaCard
+            :title="item.title"
+            :cover="`${removeHttpFromUrl(item.pic)}@320w_180h_1c`"
+            :author-name="getWatchLaterAuthor(item).name"
+            :author-href="getAuthorJumpUrl(getWatchLaterAuthor(item))"
+          >
+            <!-- 左上：在普通视频页打开 / 播放并从列表移除 -->
+            <template #coverTopLeft>
               <div
                 class="group-hover:opacity-100 opacity-0"
-                pos="absolute top-0 left-0" z-1
-                flex="~ gap-1"
+                pos="absolute top-0 left-0 z-1"
+                flex="~ gap-1 items-center"
                 m="1"
                 duration-300
               >
-                <!-- Open in regular video page button -->
-                <Tooltip :content="$t('watch_later.open_video_page')" placement="top">
-                  <button
-                    type="button"
-                    w-24px h-24px
-                    bg="black opacity-60 hover:$bew-theme-color"
-                    grid="~ place-items-center"
-                    text="white xs"
-                    border="rounded-full"
-                    @click.stop.prevent="openVideoPage(getVideoPageUrl(item.bvid))"
-                  >
-                    <i i-tabler:external-link />
-                  </button>
-                </Tooltip>
+                <PopCoverIconButton
+                  :tooltip="$t('watch_later.open_video_page')"
+                  :aria-label="$t('watch_later.open_video_page')"
+                  @click="openVideoPage(getVideoPageUrl(item.bvid))"
+                >
+                  <i i-tabler:external-link aria-hidden="true" />
+                </PopCoverIconButton>
 
-                <!-- Open in video page and remove button -->
-                <Tooltip :content="$t('watch_later.play_video')" placement="top">
-                  <button
-                    type="button"
-                    w-24px h-24px
-                    bg="black opacity-60 hover:$bew-theme-color"
-                    grid="~ place-items-center"
-                    text="white xs"
-                    border="rounded-full"
-                    @click.stop.prevent="handleOpenVideoPageAndRemove(index, item.aid, item.bvid)"
-                  >
-                    <i i-tabler:player-play />
-                  </button>
-                </Tooltip>
+                <PopCoverIconButton
+                  :tooltip="$t('watch_later.play_video')"
+                  :aria-label="$t('watch_later.play_video')"
+                  @click="handleOpenVideoPageAndRemove(index, item.aid, item.bvid)"
+                >
+                  <i i-tabler:player-play aria-hidden="true" />
+                </PopCoverIconButton>
               </div>
+            </template>
 
-              <!-- Delete button -->
+            <!-- 右上：从稍后再看移除 -->
+            <template #coverTopRight>
               <div
                 class="group-hover:opacity-100 opacity-0"
-                pos="absolute top-0 right-0" z-1 w-24px h-24px
-                bg="black opacity-60 hover:$bew-error-color"
-                grid="~ place-items-center"
+                pos="absolute top-0 right-0 z-1"
                 m="1"
+                duration-300
+              >
+                <PopCoverIconButton
+                  hover-color="error"
+                  :tooltip="$t('watch_later.remove_from_watch_later')"
+                  :aria-label="$t('watch_later.remove_from_watch_later')"
+                  @click="removeWatchLaterItem(item, index)"
+                >
+                  <i i-mingcute:close-line aria-hidden="true" />
+                </PopCoverIconButton>
+              </div>
+            </template>
+
+            <!-- 右下角：观看进度 / 总时长 -->
+            <template #coverOverlay>
+              <div
+                pos="absolute bottom-0 right-0"
+                bg="black opacity-60"
+                m="1"
+                p="x-2 y-1"
                 text="white xs"
-                duration-300
                 border="rounded-full"
-                @click.stop.prevent="deleteWatchLaterItem(index, item.aid)"
+                pointer-events-none
               >
-                <i i-mingcute:close-line />
+                {{ getProgressText(item) }}
               </div>
+            </template>
 
-              <!-- Video -->
-              <div class="bew-top-bar-media-frame">
-                <img
-                  w-full h-full
-                  :src="`${removeHttpFromUrl(
-                    item.pic,
-                  )}@320w_180h_1c`"
-                  :alt="item.title"
-                  object-cover
-                  loading="lazy"
-                >
-                <div
-                  pos="absolute bottom-0 right-0"
-                  bg="black opacity-60"
-                  m="1"
-                  p="x-2 y-1"
-                  text="white xs"
-                  border="rounded-full"
-                >
-                  <!--  When progress = -1 means that the user watched the full video -->
-                  {{
-                    `${
-                      item.progress === -1
-                        ? calcCurrentTime(item.duration)
-                        : calcCurrentTime(item.progress)
-                    } /
-                    ${calcCurrentTime(item.duration)}`
-                  }}
-                </div>
-              </div>
-              <Progress
-                :percentage="
-                  (item.progress / item.duration) * 100
-                "
-              />
-            </div>
+            <template #coverBelow>
+              <Progress :percentage="getProgressPercentage(item)" />
+            </template>
+          </PopMediaCard>
 
-            <!-- Description -->
-            <div class="bew-top-bar-media-copy">
-              <h3
-                :title="item.title"
-                class="bew-top-bar-media-title"
-              >
-                {{ item.title }}
-              </h3>
-              <div text="$bew-text-2" m="t-2" flex="~ items-center">
-                <ALink
-                  :href="getAuthorJumpUrl(getWatchLaterAuthor(item))"
-                  type="topBar"
-                  :stop-propagation="true"
-                  class="bew-top-bar-media-author"
-                >
-                  {{ getWatchLaterAuthor(item).name }}
-                </ALink>
-              </div>
-            </div>
-          </section>
+          <!-- 删除遮罩：拦截链接点击，删除后可撤销 -->
+          <div
+            v-if="removeStatuses.has(item.aid)"
+            class="watch-later-removed-mask"
+            @click.prevent.stop
+          >
+            <span>{{ $t('watch_later.removed') }}</span>
+            <Button
+              color="rgba(255,255,255,.35)" text-color="white" size="small"
+              :disabled="removeStatuses.get(item.aid)?.status !== 'removed'"
+              @click.prevent.stop="restoreWatchLaterItem(item.aid)"
+            >
+              <template #left>
+                <div i-mingcute-back-line />
+              </template>
+              {{ $t('common.undo') }}
+            </Button>
+          </div>
         </ALink>
       </TransitionGroup>
 
@@ -315,7 +366,7 @@ function handleOpenVideoPageAndRemove(index: number, aid: number, bvid: string) 
 
       <!-- no more content -->
       <div
-        v-if="!isLoadingWatchLater && !hasMoreContent && watchLaterList.length > 0"
+        v-if="!isLoadingWatchLater && !hasMoreContent && displayWatchLaterList.length > 0"
         text="$bew-text-3 xs center"
         p="y-4"
       >
@@ -326,6 +377,23 @@ function handleOpenVideoPageAndRemove(index: number, aid: number, bvid: string) 
 </template>
 
 <style scoped lang="scss">
+.watch-later-removed-mask {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--bew-space-2);
+  border-radius: inherit;
+  background: var(--bew-fill-4);
+  backdrop-filter: blur(20px);
+  color: white;
+  font-size: var(--bew-font-size-control);
+  cursor: default;
+}
+
 .watch-later-header-action {
   display: inline-flex;
   align-items: center;
@@ -339,10 +407,6 @@ function handleOpenVideoPageAndRemove(index: number, aid: number, bvid: string) 
   line-height: var(--bew-line-height-control);
   white-space: nowrap;
   cursor: pointer;
-
-  &:hover:not(:disabled) {
-    color: var(--bew-theme-color);
-  }
 
   &:active:not(:disabled) {
     opacity: 0.7;

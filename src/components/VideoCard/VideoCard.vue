@@ -4,7 +4,7 @@ import { computed, ref, watchEffect } from 'vue'
 import { useBewlyApp } from '~/composables/useAppProvider'
 import { useUserRelationScope } from '~/composables/useUserRelationScope'
 import { useVideoCardSharedStyles } from '~/composables/useVideoCardSharedStyles'
-import { settings } from '~/logic'
+import { hasVisibleVideoCardMenuAction, settings } from '~/logic'
 import type { VideoCardLayoutSetting } from '~/logic/storage'
 import { calcCurrentTime, numFormatter } from '~/utils/dataFormatter'
 import { recordVideoVisit } from '~/utils/videoVisitHistory'
@@ -12,7 +12,7 @@ import { recordVideoVisit } from '~/utils/videoVisitHistory'
 import VideoCardCover from './components/VideoCardCover.vue'
 import VideoCardInfo from './components/VideoCardInfo.vue'
 import { useVideoCardLogic } from './composables/useVideoCardLogic'
-import type { Video, VideoCardState } from './types'
+import type { Video, VideoCardRemovedState, VideoCardState } from './types'
 import VideoCardContextMenu from './VideoCardContextMenu/VideoCardContextMenu.vue'
 
 const props = withDefaults(defineProps<Props>(), {
@@ -39,6 +39,8 @@ interface Props {
   coverTopLeftAlwaysVisible?: boolean
   coverTopRightAlwaysVisible?: boolean
   persistentState?: VideoCardState
+  /** 页面持有的移除状态（取消稍后再看/取消收藏的确认与还原），与卡片自身的不感兴趣移除共用遮罩 */
+  removedState?: VideoCardRemovedState
 }
 
 const layout = computed((): VideoCardLayoutSetting => {
@@ -49,7 +51,7 @@ const layout = computed((): VideoCardLayoutSetting => {
 const showMoreButton = computed(() =>
   props.moreBtn
   && settings.value.showVideoCardMoreButton
-  && settings.value.videoCardContextMenuConfig.some(item => item.visible),
+  && hasVisibleVideoCardMenuAction(settings.value.videoCardContextMenuConfig),
 )
 
 // 包括接口自带关注状态的卡片，保留同屏关注操作的共享结果。
@@ -63,6 +65,14 @@ const logic = useVideoCardLogic(props, props.persistentState)
 // Keep menus, keyboard focus (handled by the grid), and fullscreen previews alive.
 defineExpose({ canRecycle: computed(() => !logic.showVideoOptions.value && !logic.isPreviewFullscreen.value && !logic.isHover.value) })
 const { mainAppRef } = useBewlyApp()
+const isRemoved = computed(() => logic.removed.value || Boolean(props.removedState))
+
+function handleUndo() {
+  if (props.removedState)
+    props.removedState.onUndo?.()
+  else
+    logic.handleUndo()
+}
 
 // 使用共享样式（避免每个卡片重复计算）
 const { titleFontSizeClass, titleStyle, authorFontSizeClass, metaFontSizeClass } = useVideoCardSharedStyles()
@@ -165,6 +175,11 @@ const hoverPreviewOnCoverOnly = computed(() =>
 )
 
 function handleLinkClick(event: MouseEvent) {
+  // 移除遮罩期间卡片不再作为链接响应
+  if (props.removedState) {
+    event.preventDefault()
+    return
+  }
   if (props.video)
     recordVideoVisit(props.video)
 
@@ -364,7 +379,7 @@ provide('getVideoType', () => props.type!)
         v-bind="coverSkeleton ? {} : {
           href: logic.videoUrl.value,
           type: 'videoCard',
-          customClickEvent: Boolean(props.customClickHandler) || settings.videoCardLinkOpenMode === 'drawer' || settings.videoCardLinkOpenMode === 'background',
+          customClickEvent: Boolean(props.customClickHandler) || settings.videoCardLinkOpenMode === 'drawer' || settings.videoCardLinkOpenMode === 'dialog' || settings.videoCardLinkOpenMode === 'background',
           customClickEventIncludesModifiers: Boolean(props.customClickHandler),
           disableDragging: shouldDisableLinkDragging,
         }"
@@ -377,17 +392,20 @@ provide('getVideoType', () => props.type!)
           v-on="coverSkeleton ? {} : coverEvents"
         >
           <VideoCardCover
+            v-model:video-element="logic.videoElement.value"
+            v-model:preview-time="logic.videoCurrentTime.value"
             :skeleton="coverSkeleton"
             :video="props.video"
             :layout="layout"
             :horizontal="horizontal"
-            :removed="logic.removed.value"
+            :removed="isRemoved"
+            :removed-message="props.removedState?.message"
+            :removed-pending="props.removedState?.pending"
+            :removed-confirming="props.removedState?.confirming"
             :is-hover="logic.isHover.value"
             :should-hide-overlay-elements="Boolean(logic.shouldHideOverlayElements.value)"
             :preview-video-url="logic.previewVideoUrl.value || ''"
-            :video-element="logic.videoElement.value || null"
-            :is-in-watch-later="logic.isInWatchLater.value"
-            :show-watcher-later="showWatcherLater && settings.showVideoCardWatchLater"
+            :show-watcher-later="showWatcherLater"
             :cover-top-left-always-visible="coverTopLeftAlwaysVisible"
             :cover-top-right-always-visible="coverTopRightAlwaysVisible"
             :cover-image-url="coverImageUrl"
@@ -396,8 +414,9 @@ provide('getVideoType', () => props.type!)
             :has-cover-stats="Boolean(hasCoverStats)"
             :should-hide-cover-stats="Boolean(shouldHideCoverStats)"
             :show-local-watch-progress="!hideWatchedBadge && settings.showVideoWatchedBadge && !props.video?.roomid"
-            @toggle-watch-later="logic.toggleWatchLater"
-            @undo="logic.handleUndo"
+            @undo="handleUndo"
+            @confirm-removed="props.removedState?.onConfirm?.()"
+            @cancel-removed="props.removedState?.onCancel?.()"
             @preview-fullscreen-change="logic.handlePreviewFullscreenChange"
           >
             <template #coverTopLeft>
@@ -411,7 +430,7 @@ provide('getVideoType', () => props.type!)
 
         <!-- Other Information -->
         <VideoCardInfo
-          v-if="!logic.removed.value"
+          v-if="!isRemoved"
           ref="infoComponentRef"
           :class="{ 'horizontal-card-info': horizontal }"
           :skeleton="infoSkeleton"
@@ -428,6 +447,7 @@ provide('getVideoType', () => props.type!)
           :plugin-computed-tags="pluginComputedTags"
           :hide-author="hideAuthor"
           :hide-watched-badge="hideWatchedBadge"
+          :compact-meta="props.type === 'appRcmd' && settings.appRecommendationColumn === 'double'"
           @more-btn-click="logic.handleMoreBtnClick"
         />
         <!-- Keep the configured cover/info ratio after horizontal cards are removed. -->

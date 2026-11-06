@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onKeyStroke, useMouseInElement } from '@vueuse/core'
+import { onKeyStroke } from '@vueuse/core'
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 
 import { useBewlyApp } from '~/composables/useAppProvider'
@@ -37,10 +37,22 @@ const hideTopBar = ref<boolean>(false)
 const desiredTopBarVisible = ref(true)
 const forceHideTopBar = ref(false)
 const bewlyWidescreenActive = ref(false)
-const headerTarget = ref(null)
-const topAreaTarget = ref(null)
-const { isOutside: isOutsideTopBar } = useMouseInElement(headerTarget)
-const { isOutside: isOutsideTopArea } = useMouseInElement(topAreaTarget)
+const headerTarget = ref<HTMLElement | null>(null)
+const topAreaTarget = ref<HTMLElement | null>(null)
+// Pointer boundary events instead of useMouseInElement: that composable re-read
+// the header's rect whenever its style or class changed, which happens on every
+// scroll frame, forcing a synchronous layout each time.
+const isOutsideTopBar = ref(true)
+const isOutsideTopArea = ref(true)
+// v-if removes these elements without a pointerleave.
+watch(headerTarget, (element) => {
+  if (!element)
+    isOutsideTopBar.value = true
+})
+watch(topAreaTarget, (element) => {
+  if (!element)
+    isOutsideTopArea.value = true
+})
 
 // 当前URL
 const currentUrl = ref(window.location.href)
@@ -118,14 +130,24 @@ function syncOriginalVideoTopBarVisibility(visible: boolean) {
   document.documentElement.classList.toggle(ORIGINAL_VIDEO_TOP_BAR_HIDDEN_CLASS, shouldControl && !visible)
 }
 
+// 鼠标显示只控制插件顶栏；iframe 抽屉宿主的顶栏属于原页面，沿用其他页面配置。
+const isShowOnMouseActive = computed(() => {
+  void currentUrl.value
+  if (settings.value.useOriginalBilibiliTopBar)
+    return false
+
+  const config = isVideoOrBangumiPage() && !isIframeDrawerHost()
+    ? settings.value.videoPageTopBarConfig
+    : settings.value.otherPageTopBarConfig
+  return config === VideoPageTopBarConfig.ShowOnMouse
+})
+
 // 处理顶栏显示/隐藏逻辑的函数
 function handleTopBarVisibility() {
   if (bewlyWidescreenActive.value)
     return
 
-  if (isVideoOrBangumiPage()
-    && !settings.value.useOriginalBilibiliTopBar
-    && settings.value.videoPageTopBarConfig === VideoPageTopBarConfig.ShowOnMouse) {
+  if (isShowOnMouseActive.value) {
     // 清除之前的计时器
     if (hideTimer) {
       clearTimeout(hideTimer)
@@ -169,7 +191,7 @@ watch(
     () => settings.value.enableTopBar,
     () => settings.value.useOriginalBilibiliTopBar,
     () => settings.value.videoPageTopBarConfig,
-    () => settings.value.autoHideTopBar,
+    () => settings.value.otherPageTopBarConfig,
   ],
   () => setupScrollListeners(),
 )
@@ -259,6 +281,12 @@ function handleScroll(arg?: number | Event): void {
   }
   // 处理其他页面的自动隐藏逻辑
   else {
+    // 鼠标显示：滚动监听仅用于空间页导航栏冲突检测
+    if (isShowOnMouseActive.value) {
+      finishScrollHandling()
+      return
+    }
+
     if (scrollTop.value === 0) {
       setTopBarVisibleFromScroll(true, scrollDelta)
       finishScrollHandling()
@@ -266,7 +294,7 @@ function handleScroll(arg?: number | Event): void {
     }
 
     // 在用户首页强制开启滚动隐藏，无论设置如何
-    if (isUserSpacePage() || settings.value.autoHideTopBar) {
+    if (isUserSpacePage() || settings.value.otherPageTopBarConfig === VideoPageTopBarConfig.ShowOnScroll) {
       if (!hideTopBar.value && scrollDelta < 0) {
         topBarVisibilityAnchorScrollTop.value = scrollTop.value
       }
@@ -312,20 +340,15 @@ function setupScrollListeners() {
     return
   }
 
-  // 根据视频页面配置设置初始显示状态
-  if (isVideoOrBangumiPage()) {
-    const config = settings.value.videoPageTopBarConfig
-    if (config === VideoPageTopBarConfig.AlwaysHide
-      || (config === VideoPageTopBarConfig.ShowOnMouse && !settings.value.useOriginalBilibiliTopBar)) {
-      toggleTopBarVisible(false)
-    }
-    else {
-      toggleTopBarVisible(true)
-    }
+  // 切换页面或设置后丢弃上一种模式遗留的延迟隐藏
+  if (hideTimer) {
+    clearTimeout(hideTimer)
+    hideTimer = null
   }
-  else {
-    toggleTopBarVisible(true)
-  }
+
+  // 根据页面配置设置初始显示状态
+  toggleTopBarVisible(!isShowOnMouseActive.value
+    && !(isVideoOrBangumiPage() && settings.value.videoPageTopBarConfig === VideoPageTopBarConfig.AlwaysHide))
 
   // 清理之前的监听器
   cleanupScrollListeners()
@@ -577,16 +600,11 @@ function handleClickOutsidePopup(event: MouseEvent) {
   if (!hasActivePopup.value)
     return
 
-  const target = event.target as HTMLElement
-
-  // 检查点击是否在顶栏项目按钮上（这些按钮会自己处理切换逻辑）
-  const isTopBarItemButton = target.closest('.logo, .right-side-item, .home-button')
-  if (isTopBarItemButton)
-    return
-
-  // 检查点击是否在弹窗内
-  const isInPopup = target.closest('.bew-popover')
-  if (isInPopup)
+  // document receives the Shadow Host as event.target. Inspect the original
+  // path so opening a panel and interacting inside it never count as outside.
+  const isInside = event.composedPath().some(target => target instanceof Element
+    && target.matches('.logo, .right-side-item, .home-button, .bew-popover, [data-top-bar-panel-anchor]'))
+  if (isInside)
     return
 
   // 点击在弹窗外部，关闭所有弹窗
@@ -712,21 +730,17 @@ defineExpose({
   toggleTopBarVisible,
   handleScroll,
 })
-
-// 导出枚举供模板使用
-const VideoPageTopBarConfigEnum = VideoPageTopBarConfig
 </script>
 
 <template>
   <div class="top-bar-container">
     <!-- 顶部监听区域 -->
     <div
-      v-if="!bewlyWidescreenActive
-        && !settings.useOriginalBilibiliTopBar
-        && isVideoOrBangumiPage()
-        && settings.videoPageTopBarConfig === VideoPageTopBarConfigEnum.ShowOnMouse"
+      v-if="!bewlyWidescreenActive && isShowOnMouseActive"
       ref="topAreaTarget"
       class="top-area-listener"
+      @pointerenter="isOutsideTopArea = false"
+      @pointerleave="isOutsideTopArea = true"
     />
     <Transition name="top-bar">
       <header
@@ -743,6 +757,8 @@ const VideoPageTopBarConfigEnum = VideoPageTopBarConfig
           'hide': hideTopBar && !isLayoutEditing,
           'force-white-icon': forceWhiteIcon,
         }"
+        @pointerenter="isOutsideTopBar = false"
+        @pointerleave="isOutsideTopBar = true"
       >
         <TopBarHeader
           v-if="!isLayoutEditing || !settings.useOriginalBilibiliTopBar"

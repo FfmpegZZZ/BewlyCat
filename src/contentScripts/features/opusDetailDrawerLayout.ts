@@ -494,7 +494,6 @@ html.momentsPage.drawer.bewly-opus-layout .bewly-opus-split__media .bewly-opus-g
   object-position: center center !important;
   border-radius: 0 !important;
   user-select: none !important;
-  -webkit-user-drag: none !important;
   pointer-events: auto !important;
   cursor: zoom-in !important;
   vertical-align: top !important;
@@ -744,7 +743,6 @@ html.momentsPage.drawer.bewly-opus-layout .bewly-opus-viewer__image {
   height: auto !important;
   object-fit: contain !important;
   user-select: none !important;
-  -webkit-user-drag: none !important;
   transform-origin: center center !important;
   transition: transform 0.12s ease-out !important;
   cursor: zoom-in !important;
@@ -783,6 +781,16 @@ html.momentsPage.drawer.bewly-opus-layout .bewly-opus-viewer__close {
   border-radius: 50% !important;
   font-size: 28px !important;
   line-height: 1 !important;
+}
+/* 关闭按钮置于底部工具栏上方，并为其预留图片区域 */
+html.momentsPage.drawer.bewly-opus-layout.bewly-image-viewer-close-bottom .bewly-opus-viewer__close {
+  top: auto !important;
+  left: 50% !important;
+  bottom: 84px !important;
+  transform: translateX(-50%) !important;
+}
+html.momentsPage.drawer.bewly-opus-layout.bewly-image-viewer-close-bottom .bewly-opus-viewer__stage {
+  padding-bottom: 140px !important;
 }
 html.momentsPage.drawer.bewly-opus-layout .bewly-opus-viewer__nav {
   position: absolute !important;
@@ -835,6 +843,21 @@ html.momentsPage.drawer.bewly-opus-layout .bewly-opus-viewer__zoom {
   text-align: center !important;
   font-size: 13px !important;
   font-variant-numeric: tabular-nums !important;
+}
+html.momentsPage.drawer.bewly-opus-layout .bewly-opus-viewer__zoom {
+  width: 64px !important;
+  height: 30px !important;
+  padding: 0 4px !important;
+  border: 0 !important;
+  border-radius: 999px !important;
+  outline: none !important;
+  color: inherit !important;
+  background: transparent !important;
+  transition: background-color 0.15s ease !important;
+}
+html.momentsPage.drawer.bewly-opus-layout .bewly-opus-viewer__zoom:hover,
+html.momentsPage.drawer.bewly-opus-layout .bewly-opus-viewer__zoom:focus {
+  background: rgba(255, 255, 255, 0.14) !important;
 }
 html.momentsPage.drawer.bewly-opus-layout .bewly-opus-viewer__divider {
   width: 1px !important;
@@ -1086,10 +1109,13 @@ function hideIframeLoading() {
 }
 
 function notifyLayoutReady() {
+  // 解除遮罩必须无条件执行：split 被原站重排拆掉后 tryApply 可能重新盖罩，
+  // 若只靠首次调用揭罩，重现的遮罩将永远无法消失（含 10s 兜底路径）。
+  // 通知父页则保持一次性。
+  hideIframeLoading()
   if (layoutReadyNotified)
     return
   layoutReadyNotified = true
-  hideIframeLoading()
   try {
     window.parent.postMessage({ type: LAYOUT_READY_MSG, source: 'bewly-opus' }, '*')
   }
@@ -1489,7 +1515,6 @@ function createImageGallery(rawUrls: string[]): HTMLElement {
     image.className = 'bewly-opus-gallery__image'
     image.alt = '动态图片'
     image.decoding = 'async'
-    image.draggable = false
     stage.appendChild(image)
     slide.appendChild(stage)
     track.appendChild(slide)
@@ -1532,7 +1557,6 @@ function createImageGallery(rawUrls: string[]): HTMLElement {
   const viewerImage = document.createElement('img')
   viewerImage.className = 'bewly-opus-viewer__image'
   viewerImage.alt = '动态图片大图'
-  viewerImage.draggable = false
   viewerImage.decoding = 'async'
   viewerStage.appendChild(viewerImage)
 
@@ -1558,8 +1582,12 @@ function createImageGallery(rawUrls: string[]): HTMLElement {
   viewerToolbar.className = 'bewly-opus-viewer__toolbar'
   const viewerCounter = document.createElement('span')
   viewerCounter.className = 'bewly-opus-viewer__counter'
-  const viewerZoom = document.createElement('span')
+  const viewerZoom = document.createElement('input')
+  viewerZoom.type = 'text'
+  viewerZoom.inputMode = 'decimal'
   viewerZoom.className = 'bewly-opus-viewer__zoom'
+  viewerZoom.setAttribute('aria-label', '缩放比例，输入百分比后按回车或移开焦点应用')
+  viewerZoom.title = '缩放比例，输入百分比后按回车或移开焦点应用'
   const viewerDivider = document.createElement('span')
   viewerDivider.className = 'bewly-opus-viewer__divider'
 
@@ -1853,7 +1881,9 @@ function createImageGallery(rawUrls: string[]): HTMLElement {
   const syncViewerTransform = () => {
     viewerImage.style.transform = `translate3d(${viewerPanX}px, ${viewerPanY}px, 0) scale(${viewerScale}) rotate(${viewerRotation}deg)`
     viewerImage.classList.toggle('is-zoomed', viewerScale > 1)
-    viewerZoom.textContent = `${Math.round(viewerScale * 100)}%`
+    // 放大后拖动用于平移，原生拖拽会取消指针事件
+    viewerImage.draggable = viewerScale <= 1
+    viewerZoom.value = `${Math.round(viewerScale * 100)}%`
   }
 
   const resetViewerTransform = () => {
@@ -1865,12 +1895,21 @@ function createImageGallery(rawUrls: string[]): HTMLElement {
   }
 
   const setViewerScale = (scale: number) => {
-    viewerScale = Math.min(4, Math.max(0.25, scale))
+    viewerScale = Math.max(0.25, scale)
     if (viewerScale <= 1) {
       viewerPanX = 0
       viewerPanY = 0
     }
     syncViewerTransform()
+  }
+
+  // 百分比输入在回车或失焦时应用；无效输入还原，过小的值由 setViewerScale 收到 25%
+  const applyViewerZoomInput = () => {
+    const percent = Number.parseFloat(viewerZoom.value.replace(/[%\s]/g, ''))
+    if (Number.isFinite(percent) && percent > 0)
+      setViewerScale(percent / 100)
+    else
+      syncViewerTransform()
   }
 
   const showViewerImage = (nextIndex: number) => {
@@ -1956,6 +1995,21 @@ function createImageGallery(rawUrls: string[]): HTMLElement {
     e.preventDefault()
     e.stopPropagation()
     setViewerScale(viewerScale + 0.25)
+  })
+  viewerZoom.addEventListener('focus', () => viewerZoom.select())
+  viewerZoom.addEventListener('change', applyViewerZoomInput)
+  viewerZoom.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault()
+      applyViewerZoomInput()
+      viewerZoom.select()
+    }
+    else if (e.key === 'Escape') {
+      e.preventDefault()
+      e.stopPropagation()
+      syncViewerTransform()
+      viewer.focus({ preventScroll: true })
+    }
   })
   viewerReset.addEventListener('click', (e) => {
     e.preventDefault()
@@ -2162,7 +2216,8 @@ function createImageGallery(rawUrls: string[]): HTMLElement {
   })
 
   viewer.addEventListener('keydown', (e) => {
-    if (!viewerOpen)
+    // 输入缩放比例时不触发查看器快捷键
+    if (!viewerOpen || e.target === viewerZoom)
       return
     if (e.key === 'Escape') {
       e.preventDefault()
@@ -2442,7 +2497,9 @@ function tryApply() {
     return
   }
 
-  showIframeLoading()
+  // 首次就绪后的拆建静默重排，不再重新盖全屏遮罩，避免"露几帧又被盖住"的闪烁
+  if (!layoutReadyNotified)
+    showIframeLoading()
   applySplitLayout(root)
 }
 

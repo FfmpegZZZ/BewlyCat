@@ -4,10 +4,11 @@ import VideoCardGrid from '~/components/VideoCardGrid.vue'
 import { useBewlyApp } from '~/composables/useAppProvider'
 import { useHomeTabState } from '~/composables/useHomeTabState'
 import type { GridLayoutType } from '~/logic'
-import { settings } from '~/logic'
 import type { PopularSeriesItem, PopularSeriesListResult, PopularSeriesOneResult, PopularSeriesVideoItem } from '~/models/video/popularSeries'
 import api from '~/utils/api'
 import { decodeHtmlEntities } from '~/utils/htmlDecode'
+
+import { getHomeContentScrollTop } from '../homeScroll'
 
 interface VideoElement extends PopularSeriesVideoItem {
   displayData?: Video
@@ -23,7 +24,7 @@ const emit = defineEmits<{
   (e: 'afterLoading'): void
 }>()
 
-const { handleBackToTop, handleReachBottom, handlePageRefresh, mainAppRef } = useBewlyApp()
+const { handleScrollJump, handleReachBottom, handlePageRefresh, mainAppRef } = useBewlyApp()
 const tabState = useHomeTabState({ retainedFields: ['activatedSeriesNumber', 'searchQuery'] })
 
 const seriesList = tabState.ref<PopularSeriesItem[]>('seriesList', [])
@@ -58,8 +59,8 @@ function calculatePosition() {
     return
   const rect = containerRef.value.getBoundingClientRect()
   dropdownPosition.value = {
-    top: rect.bottom + window.scrollY,
-    left: rect.left + window.scrollX,
+    top: rect.bottom,
+    left: rect.left,
     width: rect.width,
   }
 }
@@ -88,6 +89,7 @@ function transformWeeklyVideo(item: PopularSeriesVideoItem, rank: number): Video
     likeStr: item.stat?.like_str ?? item.stat?.like,
     publishedTimestamp: item.pubdate,
     bvid: item.bvid,
+    category: item.tname || undefined,
     cid: item.cid,
     rank,
     threePointV2: [],
@@ -121,7 +123,7 @@ async function refreshHandler() {
   if (!tabState.isCurrent() || isLoading.value)
     return
 
-  await initData()
+  await initData(activatedSeries.value?.number)
 }
 
 async function initData(preferredSeriesNumber?: number) {
@@ -233,7 +235,7 @@ function selectSeries(item: PopularSeriesItem) {
   activatedSeries.value = item
   showDropdown.value = false
   searchQuery.value = ''
-  handleBackToTop(settings.value.useSearchPageModeOnHomePage ? 510 : 0)
+  handleScrollJump(getHomeContentScrollTop())
   void getSeriesOne()
 }
 
@@ -250,7 +252,15 @@ function onMouseEnter() {
   window.removeEventListener('click', closeDropdown)
 }
 
-defineExpose({ initData })
+defineExpose({ initData: refreshHandler })
+
+function getItemDisplayData(item: VideoElement) {
+  return item.displayData
+}
+
+function getItemKey(item: VideoElement) {
+  return item.aid
+}
 </script>
 
 <template>
@@ -301,7 +311,7 @@ defineExpose({ initData })
               width: `${dropdownPosition.width}px`,
               backdropFilter: 'var(--bew-filter-glass-1)',
             }"
-            pos="absolute" bg="$bew-elevated" shadow="$bew-shadow-2"
+            pos="fixed" bg="$bew-elevated" shadow="$bew-shadow-2"
             mt-2 rounded="$bew-radius" z="10004"
             max-h-400px of-hidden
             @mouseenter="onMouseEnter"
@@ -364,10 +374,10 @@ defineExpose({ initData })
         :grid-layout="gridLayout"
         :loading="isLoading"
         :no-more-content="noMoreContent"
-        :transform-item="(item: VideoElement) => item.displayData"
-        :get-item-key="(item: VideoElement) => item.aid"
+        :transform-item="getItemDisplayData"
+        :get-item-key="getItemKey"
         show-preview
-        @refresh="initData"
+        @refresh="refreshHandler"
         @load-more="() => {}"
       />
     </div>

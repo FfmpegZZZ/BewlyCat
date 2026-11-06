@@ -1,9 +1,13 @@
 import browser from 'webextension-polyfill'
 
 import { isContentScriptTargetUrl } from '~/constants/contentScript'
-import { BILIBILI_DESKTOP_USER_AGENT, isBilibiliWwwUrl, isPreventMobileRedirectEnabled } from '~/utils/bilibiliDesktopNavigation'
+import { BILIBILI_DESKTOP_USER_AGENT, getBilibiliDesktopNavigatorValues, isBilibiliWwwUrl, isPreventMobileRedirectEnabled } from '~/utils/bilibiliDesktopNavigation'
+import { GET_BROWSER_INFO_MESSAGE, getExtensionBrowserInfo } from '~/utils/browserInfo'
+import { onMessage } from '~/utils/messaging'
 
+import { isAppClientRequestUrl, setupAppClient } from './appClient'
 import { setupContentScriptRefreshPrompt } from './contentScriptRefreshPrompt'
+import { setupExtensionCacheStore } from './extensionCacheStore'
 import { setupLoginStateWatcher } from './loginStateWatcher'
 import { setupApiMsgListeners } from './messageListeners/api'
 import { setupTabMsgListeners } from './messageListeners/tabs'
@@ -93,17 +97,30 @@ async function syncPreventMobileRedirectRule(enabled: boolean) {
   }
 }
 
+let preventMobileRedirectApplied = false
+
+function applyPreventMobileRedirectSetting(storedSettings: unknown) {
+  const enabled = isPreventMobileRedirectEnabled(storedSettings)
+  // 任一设置项变化都会触发；规则重建在浏览器主进程执行，开关未变时跳过。
+  if (preventMobileRedirectApplied && enabled === preventMobileRedirectEnabled)
+    return Promise.resolve()
+
+  preventMobileRedirectApplied = true
+  preventMobileRedirectEnabled = enabled
+  return syncPreventMobileRedirectRule(enabled)
+}
+
 const preventMobileRedirectReady = browser.storage.local.get('settings').then((result) => {
-  preventMobileRedirectEnabled = isPreventMobileRedirectEnabled(result.settings)
-  return syncPreventMobileRedirectRule(preventMobileRedirectEnabled)
+  // 启动读取期间已收到变更时，变更值更新，不能被启动快照覆盖。
+  if (!preventMobileRedirectApplied)
+    return applyPreventMobileRedirectSetting(result.settings)
 })
 
 browser.storage.onChanged.addListener((changes, areaName) => {
   if (areaName !== 'local' || !changes.settings)
     return
 
-  preventMobileRedirectEnabled = isPreventMobileRedirectEnabled(changes.settings.newValue)
-  void syncPreventMobileRedirectRule(preventMobileRedirectEnabled)
+  void applyPreventMobileRedirectSetting(changes.settings.newValue)
 })
 
 // 扩展启动时初始化 WBI 密钥
@@ -126,7 +143,7 @@ if (isFirefoxBuild) {
         for (const header of details.requestHeaders || []) {
           const headerName = header.name.toLowerCase()
           if (headerName === 'user-agent') {
-            requestHeaders.push({ name: header.name, value: BILIBILI_DESKTOP_USER_AGENT })
+            requestHeaders.push({ name: header.name, value: getBilibiliDesktopNavigatorValues(header.value || navigator.userAgent).userAgent })
             hasUserAgent = true
           }
           else if (headerName === 'sec-ch-ua-mobile') {
@@ -141,8 +158,19 @@ if (isFirefoxBuild) {
         }
 
         if (!hasUserAgent)
-          requestHeaders.push({ name: 'User-Agent', value: BILIBILI_DESKTOP_USER_AGENT })
+          requestHeaders.push({ name: 'User-Agent', value: getBilibiliDesktopNavigatorValues(navigator.userAgent).userAgent })
 
+        return { ...details, requestHeaders }
+      }
+
+      // 后台发出的 APP 接口请求与 PiliPlus 一致：不带 Origin，Referer 固定为主站
+      if (details.documentUrl && isExtensionUri(details.documentUrl) && isAppClientRequestUrl(details.url)) {
+        for (const header of details.requestHeaders || []) {
+          const headerName = header.name.toLowerCase()
+          if (headerName !== 'origin' && headerName !== 'referer')
+            requestHeaders.push(header)
+        }
+        requestHeaders.push({ name: 'Referer', value: 'https://www.bilibili.com' })
         return { ...details, requestHeaders }
       }
 
@@ -180,9 +208,12 @@ if (isFirefoxBuild) {
 // Setup all message listeners
 setupSettingsStorageCoordinator()
 setupSettingsCloudSync()
+setupExtensionCacheStore()
 setupApiMsgListeners()
+setupAppClient()
 setupTabMsgListeners()
 setupTopBarStateBroker()
 setupWatchLaterStateBroker()
 setupContentScriptRefreshPrompt()
 setupLoginStateWatcher()
+onMessage(GET_BROWSER_INFO_MESSAGE, getExtensionBrowserInfo)

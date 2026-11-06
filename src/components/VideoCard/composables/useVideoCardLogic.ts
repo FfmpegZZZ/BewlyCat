@@ -3,17 +3,14 @@ import { useToast } from 'vue-toastification'
 
 import { useBewlyApp } from '~/composables/useAppProvider'
 import { appAuthTokens, settings } from '~/logic'
-import { ensureWatchLaterState, getWatchLaterAid, isInWatchLater as isTargetInWatchLater, markWatchLater } from '~/logic/watchLaterState'
 import type { VideoInfo } from '~/models/video/videoInfo'
 import type { VideoPreviewResult } from '~/models/video/videoPreview'
 import { useTopBarStore } from '~/stores/topBarStore'
 import api from '~/utils/api'
-import { ensureFreshAppAccessToken, getTvSign, TVAppKey } from '~/utils/authProvider'
+import { ensureFreshAppAccessToken, requestAppClient } from '~/utils/authProvider'
 import { calcCurrentTime, numFormatter, parseStatNumber } from '~/utils/dataFormatter'
 import { computeFloatingMenuPosition } from '~/utils/floatingMenu'
-import { i18n } from '~/utils/i18n'
-import { getCSRF, removeHttpFromUrl } from '~/utils/main'
-import { resolvePgcEpisodeVideoIds } from '~/utils/pgcEpisode'
+import { removeHttpFromUrl } from '~/utils/main'
 import { openLinkInBackground } from '~/utils/tabs'
 
 import type { Video, VideoCardState } from '../types'
@@ -25,34 +22,14 @@ interface VideoCardProps {
   skeleton?: boolean
   video?: Video
   type?: 'rcmd' | 'appRcmd' | 'bangumi' | 'common'
-  showWatcherLater?: boolean
   horizontal?: boolean
   showPreview?: boolean
   moreBtn?: boolean
 }
 
-interface AppFeedFeedbackSelection {
-  reasonId?: number
-  feedbackId?: number
-}
-
-function createAppFeedFeedbackParams(video: Video, selection?: AppFeedFeedbackSelection) {
-  return {
-    access_key: appAuthTokens.value.accessToken,
-    goto: video.goto,
-    id: video.param || video.id,
-    reason_id: selection?.reasonId,
-    feedback_id: selection?.feedbackId,
-    build: 1,
-    mobi_app: 'android',
-    appkey: TVAppKey.appkey,
-    ts: Math.floor(Date.now() / 1000).toString(),
-  }
-}
-
 export function useVideoCardLogic(propsOrGetter: MaybeRefOrGetter<VideoCardProps>, savedState?: VideoCardState) {
   const toast = useToast()
-  const { openIframeDrawer } = useBewlyApp()
+  const { openIframeDrawer, openVideoDialog } = useBewlyApp()
   const topBarStore = useTopBarStore()
 
   // 将传入的 props 转换为 computed，确保响应式
@@ -69,16 +46,7 @@ export function useVideoCardLogic(propsOrGetter: MaybeRefOrGetter<VideoCardProps
   const removed = toRef(interactionState, 'removed')
   const moreBtnRef = ref<HTMLButtonElement | null>(null)
   const contextMenuRef = ref<HTMLDivElement | null>(null)
-  const selectedDislikeOpt = toRef(interactionState, 'selectedDislikeOpt')
   const videoCurrentTime = toRef(interactionState, 'videoCurrentTime')
-  const resolvedWatchLaterAid = toRef(interactionState, 'resolvedWatchLaterAid')
-  const isInWatchLater = computed(() => {
-    // 不显示按钮的卡片不订阅共享状态，状态更新时无需重新计算
-    if (!props.value.showWatcherLater || !settings.value.showVideoCardWatchLater)
-      return false
-    const target = getWatchLaterTarget()
-    return target ? isTargetInWatchLater(target) : false
-  })
   const isHover = ref<boolean>(false)
   const isPreviewFullscreen = ref<boolean>(false)
   const mouseEnterTimeOut = ref<number | null>(null)
@@ -131,10 +99,8 @@ export function useVideoCardLogic(propsOrGetter: MaybeRefOrGetter<VideoCardProps
       return undefined
 
     let url = ''
-    if (props.value.video.url)
-      url = props.value.video.url
-    else if (props.value.video.bvid || props.value.video.aid)
-      url = getCurrentVideoUrl(props.value.video, videoCurrentTime)
+    if (props.value.video.url || props.value.video.bvid || props.value.video.aid)
+      url = getCurrentVideoUrl(props.value.video, settings.value.resumeFromVideoPreview ? videoCurrentTime.value : null)
     else if (props.value.video.epid)
       url = `https://www.bilibili.com/bangumi/play/ep${props.value.video.epid}/`
     else if (props.value.video.roomid)
@@ -205,8 +171,10 @@ export function useVideoCardLogic(propsOrGetter: MaybeRefOrGetter<VideoCardProps
     })
     const isStale = () => cancelled || isDisposed.value || !isActive.value || !isHover.value
 
-    if (identity !== previousIdentity)
+    if (identity !== previousIdentity) {
       clearPreviewVideoUrl()
+      videoCurrentTime.value = null
+    }
 
     if (!props.value.video || !newValue)
       return
@@ -308,91 +276,7 @@ export function useVideoCardLogic(propsOrGetter: MaybeRefOrGetter<VideoCardProps
   })
 
   // Methods
-  function refreshTopBarWatchLaterAfterMutation() {
-    const refresh = () => {
-      void topBarStore.syncWatchLaterState(true).catch((error) => {
-        console.error('刷新顶栏稍后再看状态失败:', error)
-      })
-    }
-
-    // 先立即同步；B 站写入偶尔有短暂延迟，再补一次最终状态。
-    refresh()
-    window.setTimeout(refresh, 1000)
-  }
-
-  function getWatchLaterTarget() {
-    const video = props.value.video
-    if (!video)
-      return undefined
-
-    const aid = video.aid || resolvedWatchLaterAid.value
-    // 仅在没有其他标识时把 id 当作 aid，避免不同 id 体系误匹配
-    if (!aid && !video.bvid && !video.epid)
-      return { aid: video.id }
-    return { aid, bvid: video.bvid, epid: video.epid }
-  }
-
-  async function toggleWatchLater() {
-    if (!props.value.video)
-      return
-
-    const video = props.value.video
-    if (video.epid && !video.aid && !video.bvid) {
-      const ids = await resolvePgcEpisodeVideoIds(video.epid)
-      if (!ids) {
-        toast.error(i18n.global.t('video_card.episode_watch_later_info_failed'))
-        return
-      }
-      resolvedWatchLaterAid.value = ids.aid
-    }
-
-    const target = getWatchLaterTarget()!
-    if (!isInWatchLater.value) {
-      const params: { bvid?: string, aid?: number, csrf: string } = {
-        csrf: getCSRF(),
-      }
-
-      // 优先使用bvid，如果没有则使用aid
-      if (video.bvid) {
-        params.bvid = video.bvid
-      }
-      else {
-        params.aid = video.aid || resolvedWatchLaterAid.value || video.id
-      }
-
-      api.watchlater.saveToWatchLater(params)
-        .then((res) => {
-          if (res.code === 0) {
-            markWatchLater(target, true)
-            refreshTopBarWatchLaterAfterMutation()
-          }
-          else {
-            toast.error(res.message)
-          }
-        })
-    }
-    else {
-      api.watchlater.removeFromWatchLater({
-        aid: video.aid || resolvedWatchLaterAid.value || getWatchLaterAid(target) || video.id,
-        csrf: getCSRF(),
-      })
-        .then((res) => {
-          if (res.code === 0) {
-            markWatchLater(target, false)
-            refreshTopBarWatchLaterAfterMutation()
-          }
-          else {
-            toast.error(res.message)
-          }
-        })
-    }
-  }
-
   function handleMouseEnter(event?: MouseEvent) {
-    // 稍后再看按钮在悬停时出现；共享状态已缓存时不会发请求
-    if (props.value.showWatcherLater && settings.value.showVideoCardWatchLater)
-      void ensureWatchLaterState()
-
     // Cancel any pending leave timeout
     if (mouseLeaveTimeOut.value) {
       clearTimeout(mouseLeaveTimeOut.value)
@@ -460,7 +344,7 @@ export function useVideoCardLogic(propsOrGetter: MaybeRefOrGetter<VideoCardProps
   }
 
   function handleClick(event: MouseEvent) {
-    videoCurrentTime.value = getCurrentTime(videoElement)
+    videoCurrentTime.value = getCurrentTime(videoElement) ?? videoCurrentTime.value
     if (settings.value.videoCardLinkOpenMode === 'background' && videoUrl.value && !event.ctrlKey && !event.metaKey) {
       event.preventDefault()
       openLinkInBackground(videoUrl.value)
@@ -468,6 +352,10 @@ export function useVideoCardLogic(propsOrGetter: MaybeRefOrGetter<VideoCardProps
     if (settings.value.videoCardLinkOpenMode === 'drawer' && videoUrl.value && !event.ctrlKey && !event.metaKey) {
       event.preventDefault()
       openIframeDrawer(videoUrl.value)
+    }
+    if (settings.value.videoCardLinkOpenMode === 'dialog' && videoUrl.value && !event.ctrlKey && !event.metaKey) {
+      event.preventDefault()
+      openVideoDialog(videoUrl.value)
     }
   }
 
@@ -496,11 +384,13 @@ export function useVideoCardLogic(propsOrGetter: MaybeRefOrGetter<VideoCardProps
       if (!await ensureFreshAppAccessToken())
         return
 
-      const params = createAppFeedFeedbackParams(video, selectedDislikeOpt.value)
-
-      api.video.undoDislikeVideo({
-        ...params,
-        sign: getTvSign(params),
+      // 与 PiliPlus 的 feedDislikeCancel 一致，撤销只需 goto 与 id
+      requestAppClient('feedDislikeCancel', {
+        access_key: appAuthTokens.value.accessToken,
+        goto: video.goto,
+        id: video.param || video.id,
+        build: 1,
+        mobi_app: 'android',
       }).then((res) => {
         if (res.code === 0) {
           removed.value = false
@@ -515,8 +405,7 @@ export function useVideoCardLogic(propsOrGetter: MaybeRefOrGetter<VideoCardProps
     }
   }
 
-  function handleRemoved(selectedOpt?: AppFeedFeedbackSelection) {
-    selectedDislikeOpt.value = selectedOpt
+  function handleRemoved() {
     removed.value = true
   }
 
@@ -528,7 +417,6 @@ export function useVideoCardLogic(propsOrGetter: MaybeRefOrGetter<VideoCardProps
     moreBtnRef,
     contextMenuRef,
     videoCurrentTime,
-    isInWatchLater,
     isHover,
     isPreviewFullscreen,
     previewVideoUrl,
@@ -541,7 +429,6 @@ export function useVideoCardLogic(propsOrGetter: MaybeRefOrGetter<VideoCardProps
     shouldHideOverlayElements,
 
     // Methods
-    toggleWatchLater,
     handleMouseEnter,
     handelMouseLeave,
     handlePreviewFullscreenChange,

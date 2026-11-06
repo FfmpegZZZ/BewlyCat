@@ -4,15 +4,26 @@ import type { CSSProperties } from 'vue'
 import { useI18n } from 'vue-i18n'
 
 import { useBewlyApp } from '~/composables/useAppProvider'
+import { USAGE_GUIDE_URL } from '~/constants/usageGuide'
 import { settings } from '~/logic'
 import { createTransformer } from '~/utils/transformer'
 
+import { createPinnedChannelHistory, pinnedChannelHistoryKey } from './composables/usePinnedChannelHistory'
 import type { SettingsSearchEntry } from './searchCatalog'
 import { settingsSearchEntries } from './searchCatalog'
 import type { MenuItem } from './types'
 import { MenuType } from './types'
 
 const emit = defineEmits(['close'])
+
+const pinnedChannelHistory = createPinnedChannelHistory(computed({
+  get: () => settings.value.topBarPinnedChannels,
+  set: keys => settings.value.topBarPinnedChannels = keys,
+}))
+provide(pinnedChannelHistoryKey, pinnedChannelHistory)
+// Settings is cached by KeepAlive; closing it does not dispose its scope.
+onDeactivated(pinnedChannelHistory.reset)
+onActivated(pinnedChannelHistory.reset)
 
 const { t, tm, rt } = useI18n()
 const breadcrumbDetail = ref<string>()
@@ -42,6 +53,7 @@ const settingsMenu = {
   [MenuType.Bilibili]: defineAsyncComponent(() => import('./BilibiliFeaturesEnhancement/BilibiliFeaturesEnhancement.vue')),
   [MenuType.Appearance]: defineAsyncComponent(() => import('./Appearance/Appearance.vue')),
   [MenuType.Shortcuts]: defineAsyncComponent(() => import('./Shortcuts/Shortcuts.vue')),
+  [MenuType.Data]: defineAsyncComponent(() => import('./Data/Data.vue')),
   [MenuType.About]: defineAsyncComponent(() => import('./About/About.vue')),
 }
 const settingsMenuStorageKey = 'bewly-settings-active-menu'
@@ -221,11 +233,17 @@ const settingsMenuItems: MenuItem[] = [
     sectionStart: true,
   },
   {
+    value: MenuType.Data,
+    icon: 'i-mingcute:save-2-line',
+    iconActivated: 'i-mingcute:save-2-fill',
+    titleKey: 'settings.menu_data',
+    sectionStart: true,
+  },
+  {
     value: MenuType.About,
     icon: 'i-mingcute:information-line',
     iconActivated: 'i-mingcute:information-fill',
     titleKey: 'settings.menu_about',
-    sectionStart: true,
   },
 ]
 
@@ -240,9 +258,12 @@ function getSearchEntryTitle(entry: SettingsSearchEntry) {
 
 function getSearchEntryLocation(entry: SettingsSearchEntry) {
   const primaryTitle = getMenuTitle(entry.menu)
-  return entry.secondaryTitleKey
+  const pageLocation = entry.secondaryTitleKey
     ? `${primaryTitle} / ${t(entry.secondaryTitleKey)}`
     : primaryTitle
+  return entry.contextTitleKey
+    ? `${t(entry.contextTitleKey)} · ${pageLocation}`
+    : pageLocation
 }
 
 function getTranslatedSearchTerms(key: string): string[] {
@@ -259,19 +280,59 @@ function getTranslatedSearchTerms(key: string): string[] {
   return collectTerms(tm(key))
 }
 
-function getSearchEntryText(entry: SettingsSearchEntry) {
+function getSearchEntryKeywordText(entry: SettingsSearchEntry) {
   const inferredKeywordKeys = entry.titleKey
-    ? [`${entry.titleKey}_desc`, `${entry.titleKey}_opt`, `${entry.titleKey}_option`]
+    ? [`${entry.titleKey}_desc`, `${entry.titleKey}_opt`, `${entry.titleKey}_option`, `${entry.titleKey}_unit`]
     : []
   const translatedKeywords = [...inferredKeywordKeys, ...(entry.keywordKeys ?? [])]
     .flatMap(getTranslatedSearchTerms)
 
   // 菜单路径只用于结果定位，避免输入分类名时命中整组设置。
-  return [
-    getSearchEntryTitle(entry),
-    ...translatedKeywords,
-    ...(entry.keywords ?? []),
-  ].join(' ').toLocaleLowerCase()
+  return [...translatedKeywords, ...(entry.keywords ?? [])].join(' ').toLocaleLowerCase()
+}
+
+interface SearchIndexEntry {
+  entry: SettingsSearchEntry
+  titleText: string
+  keywordText: string
+  text: string
+  order: number
+}
+
+// 搜索文本只随 locale/目录变化重算，输入时复用，避免每次击键重复翻译全部条目。
+const searchIndex = computed<SearchIndexEntry[]>(() => settingsSearchEntries.map((entry, order) => {
+  const titleText = getSearchEntryTitle(entry).toLocaleLowerCase()
+  const keywordText = getSearchEntryKeywordText(entry)
+  return {
+    entry,
+    titleText,
+    keywordText,
+    text: `${titleText} ${keywordText}`,
+    order,
+  }
+}))
+
+function getSearchMatchScore(item: SearchIndexEntry, query: string, queryParts: string[]) {
+  let score = 0
+  if (item.titleText === query)
+    score += 200
+  else if (item.titleText.includes(query))
+    score += 40
+
+  for (const part of queryParts) {
+    if (item.titleText === part)
+      score += 120
+    else if (item.titleText.startsWith(part))
+      score += 80
+    else if (item.titleText.includes(part))
+      score += 50
+    else if (item.keywordText.startsWith(part))
+      score += 20
+    else
+      score += 10
+  }
+
+  return score
 }
 
 const searchResults = computed(() => {
@@ -280,12 +341,13 @@ const searchResults = computed(() => {
     return []
 
   const queryParts = query.split(/\s+/).filter(Boolean)
-  return settingsSearchEntries
-    .filter((entry) => {
-      const searchableText = getSearchEntryText(entry)
-      return queryParts.every(part => searchableText.includes(part))
-    })
-    .slice(0, 12)
+  const matches = searchIndex.value
+    .filter(item => queryParts.every(part => item.text.includes(part)))
+    .map(item => ({ item, score: getSearchMatchScore(item, query, queryParts) }))
+
+  // 标题精确/前缀命中优先于标题包含，再到关键词命中；同分保持目录顺序。
+  matches.sort((a, b) => b.score - a.score || a.item.order - b.item.order)
+  return matches.map(({ item }) => item.entry)
 })
 
 const activeSearchResultIndex = ref(-1)
@@ -363,7 +425,7 @@ function clearSearchTargetHighlight() {
 function highlightSearchTarget(target: HTMLElement) {
   clearSearchTargetHighlight()
   const visualTarget = target.matches('.b-settings-item-group')
-    ? target.querySelector<HTMLElement>(':scope > .group-heading') ?? target
+    ? target.querySelector<HTMLElement>(':scope > .group-title') ?? target
     : target
 
   highlightedSearchTarget = visualTarget
@@ -372,14 +434,38 @@ function highlightSearchTarget(target: HTMLElement) {
   searchTargetHighlightTimer = window.setTimeout(clearSearchTargetHighlight, 2400)
 }
 
-function scrollToSearchTarget(expectedTitle: string | undefined, navigationId: number, attempts = 0) {
-  if (!expectedTitle || navigationId !== searchNavigationId || attempts > 30)
+function isVisibleTarget(element: HTMLElement) {
+  return element.getClientRects().length > 0
+}
+
+function hasClosedDetailsAncestor(element: HTMLElement, viewport: HTMLElement) {
+  let ancestor = element.parentElement
+  while (ancestor && ancestor !== viewport) {
+    if (ancestor instanceof HTMLDetailsElement && !ancestor.open)
+      return true
+    ancestor = ancestor.parentElement
+  }
+  return false
+}
+
+function isUsableTarget(element: HTMLElement | null, viewport: HTMLElement): element is HTMLElement {
+  return Boolean(element && (isVisibleTarget(element) || hasClosedDetailsAncestor(element, viewport)))
+}
+
+function scrollToSearchTarget(
+  targetKey: string | undefined,
+  expectedTitle: string | undefined,
+  fallbackTargetKey: string | undefined,
+  navigationId: number,
+  attempts = 0,
+) {
+  if ((!targetKey && !expectedTitle) || navigationId !== searchNavigationId || attempts > 30)
     return
 
   const retry = () => {
     searchTargetRetryTimer = window.setTimeout(() => {
       searchTargetRetryTimer = undefined
-      scrollToSearchTarget(expectedTitle, navigationId, attempts + 1)
+      scrollToSearchTarget(targetKey, expectedTitle, fallbackTargetKey, navigationId, attempts + 1)
     }, 100)
   }
   const viewport = scrollViewportRef.value
@@ -389,8 +475,26 @@ function scrollToSearchTarget(expectedTitle: string | undefined, navigationId: n
     return
   }
 
-  const target = Array.from(viewport.querySelectorAll<HTMLElement>('[data-settings-title]'))
-    .find(element => element.dataset.settingsTitle === expectedTitle)
+  const queryByKey = (key: string) => Array.from(
+    viewport.querySelectorAll<HTMLElement>(`[data-settings-key="${CSS.escape(key)}"]`),
+  ).find(element => isUsableTarget(element, viewport)) ?? null
+  const queryByTitle = (title: string | undefined) => title
+    ? Array.from(viewport.querySelectorAll<HTMLElement>('[data-settings-title]'))
+      .find(element => element.dataset.settingsTitle === title && isUsableTarget(element, viewport)) ?? null
+    : null
+
+  const keyedTarget = targetKey ? queryByKey(targetKey) : null
+  const titleTarget = expectedTitle ? queryByTitle(expectedTitle) : null
+  // 条件目标可能不存在；给它两轮挂载时间后落到始终可见的父项。
+  const fallbackTarget = fallbackTargetKey && attempts >= 2
+    ? queryByKey(fallbackTargetKey) ?? queryByTitle(t(fallbackTargetKey))
+    : null
+  // 未配置父项时至少把用户带到当前页面，避免点击完全无反馈。
+  const pageTarget = attempts >= 10
+    ? Array.from(viewport.querySelectorAll<HTMLElement>('[data-settings-title]')).find(isVisibleTarget) ?? null
+    : null
+  const target = keyedTarget ?? titleTarget ?? fallbackTarget ?? pageTarget
+  const usedPageFallback = !keyedTarget && !titleTarget && !fallbackTarget && Boolean(pageTarget)
   if (!target) {
     retry()
     return
@@ -429,7 +533,9 @@ function scrollToSearchTarget(expectedTitle: string | undefined, navigationId: n
         top: Math.max(0, viewport.scrollTop + targetRect.top - viewportRect.top - viewport.clientTop - headerInset - centerOffset),
         behavior: 'smooth',
       })
-      highlightSearchTarget(target)
+      // 页面级兜底只负责把用户带到正确页面，避免把“已定位”标注到无关设置上。
+      if (!usedPageFallback)
+        highlightSearchTarget(target)
     })
   })
 }
@@ -437,16 +543,19 @@ function scrollToSearchTarget(expectedTitle: string | undefined, navigationId: n
 function navigateToSearchResult(entry: SettingsSearchEntry) {
   cancelSearchNavigation()
   const navigationId = searchNavigationId
+  // 页面存储值未变化时保持现有页面实例，避免无意义的整页重挂载。
+  const shouldReloadContent = entry.storageValues?.some(({ key, value }) => sessionStorage.getItem(key) !== value) ?? false
   entry.storageValues?.forEach(({ key, value }) => sessionStorage.setItem(key, value))
 
   activatedMenuItem.value = entry.menu
-  if (entry.storageValues?.length)
+  if (shouldReloadContent)
     settingsContentKey.value++
   searchQuery.value = ''
   const targetTitle = entry.targetTitleKey
     ? t(entry.targetTitleKey)
     : entry.targetTitle ?? getSearchEntryTitle(entry)
-  nextTick(() => scrollToSearchTarget(targetTitle, navigationId))
+  const targetKey = entry.targetTitleKey ?? entry.titleKey
+  nextTick(() => scrollToSearchTarget(targetKey, targetTitle, entry.fallbackTargetKey, navigationId))
 }
 
 const secondaryPageStorageKeys: Partial<Record<MenuType, string>> = {
@@ -674,7 +783,8 @@ function changeMenuItem(menuItem: MenuType) {
           h-inherit of-y-auto of-x-hidden
           style="padding-top: 92px;"
         >
-          <main w-full min-h="[calc(100%-92px)]" p="x-12 b-10">
+          <!-- 底部留白高于右下角帮助按钮（16px 边距 + 32px），让末行内容可滚到按钮上方 -->
+          <main w-full min-h="[calc(100%-92px)]" p="x-12 b-20">
             <!-- <div h-80px mt--8 /> -->
 
             <Transition name="page-fade">
@@ -686,6 +796,27 @@ function changeMenuItem(menuItem: MenuType) {
             </Transition>
           </main>
         </div>
+
+        <!-- 右下角落在内容区 x-12 内边距内，不遮挡设置项右侧控件 -->
+        <Tooltip
+          class="settings-usage-guide"
+          :content="$t('settings.usage_guide')"
+          placement="left"
+          floating
+          floating-z-index="var(--bew-z-settings-tooltip)"
+        >
+          <a
+            :href="USAGE_GUIDE_URL"
+            target="_blank"
+            rel="noopener noreferrer"
+            :aria-label="$t('settings.usage_guide')"
+            :style="{
+              backdropFilter: settings.enableFrostedGlass ? 'var(--bew-filter-glass-1)' : 'none',
+            }"
+          >
+            <i i-mingcute:question-line />
+          </a>
+        </Tooltip>
       </div>
     </div>
 
@@ -840,6 +971,46 @@ function changeMenuItem(menuItem: MenuType) {
   strong:last-child {
     flex: 1 1 auto;
   }
+}
+
+/* 需高于 Tooltip 根节点自带的 relative 定位 */
+.settings-content .settings-usage-guide {
+  position: absolute;
+  right: var(--bew-space-4);
+  bottom: var(--bew-space-4);
+  z-index: 1;
+
+  a {
+    display: flex;
+    box-sizing: border-box;
+    align-items: center;
+    justify-content: center;
+    width: 32px;
+    height: 32px;
+    color: var(--bew-text-2);
+    font-size: 16px;
+    background: var(--bew-elevated);
+    border: 1px solid var(--bew-border-color);
+    border-radius: 50%;
+    box-shadow: var(--bew-shadow-edge-glow-1), var(--bew-shadow-2);
+    transition:
+      color var(--bew-duration-moderate) var(--bew-ease-standard),
+      background-color var(--bew-duration-moderate) var(--bew-ease-standard);
+  }
+
+  a:hover {
+    color: var(--bew-theme-color);
+    background: var(--bew-theme-color-30);
+  }
+
+  a:focus-visible {
+    outline: 2px solid var(--bew-theme-color-40);
+    outline-offset: 2px;
+  }
+}
+
+.dark .settings-content .settings-usage-guide a:not(:hover) {
+  background: var(--bew-fill-1);
 }
 
 .settings-search {

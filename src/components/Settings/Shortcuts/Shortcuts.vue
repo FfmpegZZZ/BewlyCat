@@ -86,6 +86,7 @@ const configurableShortcutsGroups: ShortcutGroup[] = [
       { id: 'turnOffLight', name: t('settings.shortcuts.turn_off_light'), description: t('settings.shortcuts.turn_off_light_desc'), defaultKey: 'I' },
       { id: 'caption', name: t('settings.shortcuts.caption'), description: t('settings.shortcuts.caption_desc'), defaultKey: 'C' },
       { id: 'videoScreenshot', name: t('settings.shortcuts.video_screenshot'), description: t('settings.shortcuts.video_screenshot_desc'), defaultKey: 'Shift+S' },
+      { id: 'listenVideo', name: t('settings.shortcuts.listen_video'), description: t('settings.shortcuts.listen_video_desc'), defaultKey: 'Shift+M' },
       { id: 'increasePlaybackRate', name: t('settings.shortcuts.increase_playback_rate'), description: t('settings.shortcuts.increase_playback_rate_desc'), defaultKey: '+' },
       { id: 'decreasePlaybackRate', name: t('settings.shortcuts.decrease_playback_rate'), description: t('settings.shortcuts.decrease_playback_rate_desc'), defaultKey: '-' },
       { id: 'resetPlaybackRate', name: t('settings.shortcuts.reset_playback_rate'), description: t('settings.shortcuts.reset_playback_rate_desc'), defaultKey: '0' },
@@ -98,9 +99,9 @@ const configurableShortcutsGroups: ShortcutGroup[] = [
   {
     title: t('settings.shortcuts.group.fullscreen_mode'),
     shortcuts: [
-      { id: 'increaseVideoSize', name: t('settings.shortcuts.increase_video_size'), description: t('settings.shortcuts.increase_video_size_desc'), defaultKey: 'Shift++' },
-      { id: 'decreaseVideoSize', name: t('settings.shortcuts.decrease_video_size'), description: t('settings.shortcuts.decrease_video_size_desc'), defaultKey: 'Shift+-' },
-      { id: 'resetVideoSize', name: t('settings.shortcuts.reset_video_size'), description: t('settings.shortcuts.reset_video_size_desc'), defaultKey: 'Shift+0' },
+      { id: 'increaseVideoSize', name: t('settings.shortcuts.increase_video_size'), description: t('settings.shortcuts.increase_video_size_desc'), defaultKey: '' },
+      { id: 'decreaseVideoSize', name: t('settings.shortcuts.decrease_video_size'), description: t('settings.shortcuts.decrease_video_size_desc'), defaultKey: '' },
+      { id: 'resetVideoSize', name: t('settings.shortcuts.reset_video_size'), description: t('settings.shortcuts.reset_video_size_desc'), defaultKey: '' },
       { id: 'videoTitle', name: t('settings.shortcuts.video_title'), description: t('settings.shortcuts.video_title_desc'), defaultKey: 'B' },
       { id: 'videoTime', name: t('settings.shortcuts.video_time'), description: t('settings.shortcuts.video_time_desc'), defaultKey: 'G' },
       { id: 'clockTime', name: t('settings.shortcuts.clock_time'), description: t('settings.shortcuts.clock_time_desc'), defaultKey: 'H' },
@@ -121,7 +122,7 @@ const vFocusShortcutEditor = {
 
 // --- Helper Functions ---
 function getShortcutSetting(id: ConfigurableShortcutId): BaseShortcutSetting | undefined {
-  return settings.value.shortcuts?.[id]
+  return getEffectiveShortcutSetting(String(id))
 }
 
 function getDefaultShortcutSetting(id: ConfigurableShortcutId): BaseShortcutSetting | undefined {
@@ -139,7 +140,7 @@ function checkShortcutConflict(key: string, currentId: ConfigurableShortcutId, a
       if (shortcut.id === currentId)
         continue
 
-      const shortcutSetting = settings.value.shortcuts[shortcut.id]
+      const shortcutSetting = getShortcutSetting(shortcut.id)
       if (shortcutSetting && typeof shortcutSetting === 'object' && shortcutSetting.key) {
         if (normalizedKeys.includes(normalizeShortcutKey(shortcutSetting.key))) {
           return {
@@ -231,9 +232,9 @@ function handleKeyUp(event: KeyboardEvent, id: ConfigurableShortcutId) {
   event.stopPropagation()
 
   // 如果所有按键都已释放，保存快捷键
-  if (!event.ctrlKey && !event.altKey && !event.shiftKey && !event.metaKey) {
-    if (currentKeyCombo.value.length > 0) {
-      const keyCombo = currentKeyCombo.value.join('+')
+  if (!event.ctrlKey && !event.altKey && !event.shiftKey && !event.metaKey && currentKeyCombo.value) {
+    const keyCombo = currentKeyCombo.value
+    const conflictResult = checkShortcutConflict(keyCombo, id)
 
       // 检查是否为空组合
       if (keyCombo.trim() === '') {
@@ -392,7 +393,7 @@ function undoResetAllShortcuts() {
                   </button>
                 </div>
                 <Radio
-                  :model-value="settings.shortcuts[shortcutDef.id]?.enabled ?? false"
+                  :model-value="getShortcutSetting(shortcutDef.id)?.enabled ?? false"
                   @update:model-value="(value) => {
                     if (!settings.shortcuts[shortcutDef.id]) {
                       settings.shortcuts[shortcutDef.id] = { key: shortcutDef.defaultKey, enabled: value }

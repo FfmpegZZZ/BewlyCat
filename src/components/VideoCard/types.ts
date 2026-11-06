@@ -3,13 +3,24 @@ import type { ThreePointV2 } from '~/models/video/appForYou'
 /** Data-only interaction state survives offscreen card recycling. */
 export interface VideoCardState {
   removed: boolean
-  selectedDislikeOpt?: { reasonId?: number, feedbackId?: number }
   videoCurrentTime: number | null
-  resolvedWatchLaterAid?: number
 }
 
 export function createVideoCardState(): VideoCardState {
   return { removed: false, videoCurrentTime: null }
+}
+
+/**
+ * 由页面持有的移除遮罩：confirming 时显示「确定/取消」等待确认，
+ * 确认移除后卡片保留在原位，显示「还原」用于重新加回。
+ */
+export interface VideoCardRemovedState {
+  message: string
+  confirming?: boolean
+  pending?: boolean
+  onConfirm?: () => void
+  onCancel?: () => void
+  onUndo?: () => void
 }
 
 export interface Video {
@@ -57,7 +68,7 @@ export interface Video {
   tag?: string | string[]
   /** Real content tags exposed on search-result pages; clicking these starts a search. */
   searchableTags?: string[]
-  /** Searchable video partition name from APIs, such as `typename` in search results. */
+  /** Searchable video partition name from APIs, such as `tname`, `typename` or history `tag_name`. */
   category?: string
   rank?: number
   type?: 'horizontal' | 'vertical' | 'bangumi' | 'ketang'
