@@ -2,7 +2,6 @@ import { toggleListenVideo } from '~/contentScripts/listenVideoFeature'
 import { settings } from '~/logic'
 import type { BaseShortcutSetting } from '~/logic/storage'
 import { applyBewlyWidescreen, exitBewlyWidescreen, isBewlyWidescreenActive, isBewlyWidescreenEngaged } from '~/utils/bewlyWidescreen'
-import { isKeyboardInput, matchesShortcut } from '~/utils/keyboard'
 import { isVideoOrBangumiPage, isVideoPlaybackPage } from '~/utils/main'
 // 导入需要的函数
 import {
@@ -259,98 +258,7 @@ export function setupShortcutHandlers() {
   registerDefaultHandlers()
 
   // 更新快捷键配置缓存
-  updateShortcutsCache()
-
-  // 创建新的键盘事件监听器
-  keydownListener = (e: KeyboardEvent) => {
-    // 输入时保留原生键盘操作，未配置的 Command 组合也不拦截。
-    if (settings.value.keyboard === false || e.isComposing || isKeyboardInput(e)) {
-      return
-    }
-
-    const target = e.target as HTMLElement
-    // 分隔线使用方向键和 Home/End 调宽，不能被播放器快捷键提前拦截。
-    if (target?.closest?.('.bewly-widescreen-sidebar-resize-handle'))
-      return
-
-    // 检查是否事件来自插件容器
-    if ((target && target.id === 'bewly') || document.getElementById('bewly')?.classList.contains('settings-open')) {
-      return
-    }
-    // 更新快捷键配置缓存
-    updateShortcutsCache()
-
-    // 如果没有缓存的快捷键配置，直接返回
-    if (!cachedShortcuts)
-      return
-
-    // 获取播放器元素
-    const player = document.querySelector('.bpx-player') || document.querySelector('.bilibili-player')
-
-    // 遍历所有注册的快捷键
-    try {
-      // 获取所有快捷键ID
-      const shortcutIds = Object.keys(cachedShortcuts)
-
-      // 直接检查是否有匹配的快捷键ID
-      for (const id of shortcutIds) {
-        try {
-          // 尝试获取快捷键配置
-          const shortcutConfig = cachedShortcuts[id]
-
-          // 如果快捷键未启用，跳过
-          if (!shortcutConfig?.enabled)
-            continue
-
-          // 处理不同类型的快捷键配置
-          let configKey = ''
-          if (typeof shortcutConfig === 'string') {
-            configKey = shortcutConfig
-          }
-          else if (shortcutConfig && typeof shortcutConfig === 'object') {
-            configKey = String(shortcutConfig.key || '')
-          }
-
-          if (!configKey)
-            continue
-
-          // 如果快捷键匹配
-          if (matchesShortcut(e, configKey)) {
-            // 截图只在视频播放页响应，避免拦截其他页面或输入法的按键。
-            if (id === 'videoScreenshot'
-              && (e.isComposing || !(isVideoPlaybackPage() || isVideoOrBangumiPage()))) {
-              continue
-            }
-
-            // 获取处理函数
-            const handler = shortcutHandlers[id]
-            if (handler) {
-              e.preventDefault()
-              e.stopImmediatePropagation()
-
-              try {
-                handler(e, player || undefined)
-              }
-              catch {
-                // 处理器执行错误
-              }
-              return
-            }
-          }
-        }
-        catch {
-          // 处理单个快捷键时出错
-        }
-      }
-    }
-    catch {
-      // 处理快捷键时出错
-    }
-  }
-
-  // 添加事件监听器
-  // 在 window 捕获阶段监听，确保覆盖时先于 Bilibili 的 document/播放器处理器拦截事件。
-  window.addEventListener('keydown', keydownListener, true)
+  updateShortcutsCache(true)
 }
 
 /**

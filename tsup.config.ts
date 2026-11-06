@@ -26,7 +26,9 @@ export default defineConfig(() => ({
   target: isSafari ? 'safari18' : 'esnext',
   ignoreWatch: ['**/extension/**', '**/extension-firefox/**', '**/extension-safari/**'],
   splitting: false,
-  noExternal: isSafari ? [/.*/] : ['md5'],
+  loader: { '.css': 'text' },
+  noExternal: isSafari ? [/.*/] : ['md5', 'hls.js', 'flv.js'],
+  esbuildPlugins: [thirdPartyLicensesEsbuildPlugin('background')],
   sourcemap: false, // https://github.com/vitejs/vite-plugin-vue/issues/35
   define: {
     '__DEV__': JSON.stringify(isDev),
