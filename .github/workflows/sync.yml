@@ -44,7 +44,8 @@ jobs:
             echo "updated=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
-          if ! git merge --no-edit upstream/main; then
+          # 上游与 fork 同时修改同一代码块时优先保留 BewlyCat 的本地改动，其余上游提交正常合并。
+          if ! git merge --no-edit -X ours upstream/main; then
             echo "::error::Merge conflict between fork/main and upstream/main. Resolve manually."
             exit 1
           fi
