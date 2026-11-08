@@ -2,7 +2,7 @@ import fs from 'fs-extra'
 import type { Manifest } from 'webextension-polyfill'
 
 import type PkgType from '../package.json'
-import { isDev, isFirefox, isSafari, port, r } from '../scripts/utils'
+import { isDev, isFirefox, isSafari, r } from '../scripts/utils'
 import { CONTENT_SCRIPT_EXCLUDE_MATCHES, CONTENT_SCRIPT_MATCHES } from './constants/contentScript'
 
 export async function getManifest() {
@@ -16,14 +16,14 @@ export async function getManifest() {
     version: pkg.version,
     description: pkg.description,
     homepage_url: pkg.homepage,
-    // action: {
-    //   default_icon: './assets/icon-512.png',
-    //   default_popup: './dist/popup/index.html',
-    // },
-    // options_ui: {
-    //   page: './dist/options/index.html',
-    //   open_in_tab: true,
-    // },
+    action: {
+      default_title: pkg.displayName,
+      default_icon: 'assets/icon-512.png',
+    },
+    options_ui: {
+      page: 'dist/options/index.html',
+      open_in_tab: true,
+    },
 
     // Firefox 和 Safari 使用普通后台脚本，MV3 默认采用非持久化后台。
     background: (isFirefox || isSafari)
