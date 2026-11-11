@@ -23,6 +23,7 @@ import { findLeafActiveElement } from '~/utils/element'
 import { initFavoriteDialogEnhancement } from '~/utils/favoriteDialog'
 import { SELECTION_FALLBACK_CLASS, supportsHighlightInheritance } from '~/utils/highlightInheritance'
 import { i18n } from '~/utils/i18n'
+import { reportScrollbarGutterToParent } from '~/utils/iframeScrollbarGutter'
 import { runWhenIdle } from '~/utils/lazyLoad'
 import { getLocalWallpaper, hasLocalWallpaper, isLocalWallpaperUrl, localWallpapersLoaded } from '~/utils/localWallpaper'
 import { getCookie, injectCSS, isElectron, isHomePage, isInIframe, isNotificationPage, isVideoOrBangumiPage, isVideoPlaybackPage, isWatchLaterListPage } from '~/utils/main'
@@ -52,6 +53,7 @@ import { setupNotificationStateInvalidation } from './features/notificationState
 import { setupOpusDetailDrawerLayout } from './features/opusDetailDrawerLayout'
 import { setupOriginalMomentsFilter } from './features/originalMomentsFilter'
 import { setupOriginalMomentsFoldComments } from './features/originalMomentsFoldComments'
+import { verifyPageScriptVersion } from './features/pageScriptVersionCheck'
 import { setupSettingsPageBridge } from './features/settingsPageBridge'
 import { setupVideoWatchProgress } from './features/videoWatchProgress'
 import { setupWatchLaterAutoRemove } from './features/watchLaterAutoRemove'
@@ -95,6 +97,8 @@ if (shouldInitializeContentScript) {
   setupApiFailureDiagnostics()
   // 先于 B 站脚本注册快捷键监听，覆盖其默认快捷键时才能先拦截事件。
   installShortcutListener()
+  // Firefox 更新扩展后会把新版 content script 注入旧页面，而页面脚本仍是旧版。
+  verifyPageScriptVersion(version)
   browser.runtime.onMessage.addListener((message: unknown) => {
     if (typeof message === 'object' && message !== null && 'type' in message && message.type === CONTENT_SCRIPT_PING) {
       const expected = 'expectedIdentity' in message ? message.expectedIdentity : undefined
@@ -1768,6 +1772,7 @@ else if (shouldInitializeContentScript) {
 
   // useDark() 要等设置加载后才执行，提前记录父页面主题，之后由它继承。
   startIframeThemeListener()
+  reportScrollbarGutterToParent()
 
   // 监听来自父页面的黑暗模式切换消息（用于iframe跨域场景）
   window.addEventListener('message', (event) => {

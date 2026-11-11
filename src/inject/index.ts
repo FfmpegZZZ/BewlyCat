@@ -1,6 +1,7 @@
 // 由于是浏览器环境，所以引入的ts不能使用webextension-polyfill相关api，包含获取本地Storage，获取的是网页的localStorage
 import injectMessages from 'virtual:bewly-inject-messages'
 
+import { CONTENT_SCRIPT_COMMIT } from '~/constants/contentScript'
 import { isSearchResultApiPath } from '~/constants/searchApi'
 import COMMENT_REPLY_TREE_GUIDES_CSS from '~/styles/commentReplyTree.scss?inline'
 import { getBilibiliDesktopNavigatorValues, isBilibiliWwwUrl } from '~/utils/bilibiliDesktopNavigation'
@@ -10,9 +11,12 @@ import type { CommentReplyAvatarAnchor, CommentReplyTreeBranch } from '~/utils/c
 import { formatCommentReplyGuideCoordinate, getCommentReplyBranchPath, getCommentReplyBranchToggleY } from '~/utils/commentReplyTree'
 import { getCommentSexIcon, normalizeCommentLocation } from '~/utils/commentUserInfo'
 import { isElectron } from '~/utils/main'
+import type { PageScriptIdentity, PageScriptInitializedMarker, RunningPageScriptIdentity } from '~/utils/pageScriptIdentity'
+import { createPageScriptIdentityMessage, isPageScriptIdentity, PAGE_SCRIPT_PING } from '~/utils/pageScriptIdentity'
 import type { PageSettingsPayload } from '~/utils/pageSettingsProtocol'
 import { createPageSettingsPayload, readPageBootSnapshot } from '~/utils/pageSettingsProtocol'
 
+import { version } from '../../package.json'
 import { createLocalLoudnessController } from './audio/localLoudness'
 
 // 存储当前设置状态
@@ -38,16 +42,45 @@ const settingsReadyPromise = new Promise<void>((resolve) => {
 })
 
 const pageScriptGlobal = globalThis as typeof globalThis & {
-  __BEWLYCAT_PAGE_SCRIPT_INITIALIZED__?: boolean
+  __BEWLYCAT_PAGE_SCRIPT_INITIALIZED__?: PageScriptInitializedMarker
 }
+const ownPageScriptIdentity: PageScriptIdentity = Object.freeze({ version, commit: CONTENT_SCRIPT_COMMIT })
+const existingPageScriptMarker = pageScriptGlobal.__BEWLYCAT_PAGE_SCRIPT_INITIALIZED__
 // 直播站及其内嵌框架中不改写任何页面全局对象。
-const shouldInitializePageScript = !pageScriptGlobal.__BEWLYCAT_PAGE_SCRIPT_INITIALIZED__
-  && !isInBilibiliLiveContext()
+const isPageScriptContext = !isInBilibiliLiveContext()
+const shouldInitializePageScript = !existingPageScriptMarker && isPageScriptContext
 
+// 标记保存在页面全局上，扩展更新后仍会保留；记录版本供后注入的脚本判断。
 if (shouldInitializePageScript)
-  pageScriptGlobal.__BEWLYCAT_PAGE_SCRIPT_INITIALIZED__ = true
+  pageScriptGlobal.__BEWLYCAT_PAGE_SCRIPT_INITIALIZED__ = ownPageScriptIdentity
 
 const isElectronEnv = isElectron()
+
+function installPageScriptIdentityResponder(identity: RunningPageScriptIdentity) {
+  const announce = () => {
+    try {
+      window.postMessage(createPageScriptIdentityMessage(identity), window.location.origin)
+    }
+    catch {
+      // 不透明来源的框架无法按来源投递消息，content script 也不会在其中提示刷新。
+    }
+  }
+  window.addEventListener('message', (event) => {
+    if (event.source !== window || typeof event.data !== 'object' || event.data === null
+      || event.data.type !== PAGE_SCRIPT_PING) {
+      return
+    }
+    announce()
+  })
+  // content script 可能先于本脚本发出询问，启动时主动报告一次。
+  announce()
+}
+
+// 正在运行的页面脚本负责回应版本询问；旧版本不支持握手，由被跳过的新版脚本代为报告。
+if (isPageScriptContext && !isElectronEnv
+  && (shouldInitializePageScript || !isPageScriptIdentity(existingPageScriptMarker))) {
+  installPageScriptIdentityResponder(shouldInitializePageScript ? ownPageScriptIdentity : 'legacy')
+}
 if (isElectronEnv) {
   console.warn('[BewlyCat] Detected Electron environment, extension disabled.')
 }
@@ -596,6 +629,11 @@ else if (shouldInitializePageScript) {
            */
           /* 滚动条出现/消失都不改变可用宽度，避免缩进与线条被反复重算 */
           scrollbar-gutter: stable;
+          /*
+           * 吸底收起栏的 z-index 只在容器内比较。B 站吸底评论框（fixed, z-index: 1）
+           * 在 DOM 中位于楼层之前，同级比较时会被收起栏/「共 x 条回复」盖住。
+           */
+          isolation: isolate;
         }
 
         /* 原生「收起回复」在回复列表末尾；滚动时钉在容器底边保持可达 */

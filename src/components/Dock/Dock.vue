@@ -1296,13 +1296,14 @@ onUnmounted(() => {
     width: 0;
   }
 
+  // 首页滚动条在内部容器中，右侧与底部 Dock 需让出它的槽位；原版页面中该值为 0。
   &--right {
-    inset: 0 0 0 auto;
+    inset: 0 var(--bew-page-scrollbar-gutter, 0px) 0 auto;
     width: 0;
   }
 
   &--bottom {
-    inset: auto 0 0 0;
+    inset: auto var(--bew-page-scrollbar-gutter, 0px) 0 0;
     height: 0;
   }
 
@@ -1391,7 +1392,9 @@ onUnmounted(() => {
   }
 
   &.right {
-    --uno: "right-2 after:left--4px";
+    --uno: "after:left--4px";
+    // 右侧紧邻滚动条时只保留内层外边距，避免与窗口边缘的距离明显大于左侧 Dock。
+    right: max(0px, calc(var(--bew-space-2) - var(--bew-page-scrollbar-size, 0px)));
   }
   &.right.hide:not(.hover) {
     --uno: "opacity-0 !translate-x-100%";
