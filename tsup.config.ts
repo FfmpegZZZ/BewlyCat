@@ -10,8 +10,6 @@ const outDir = isFirefox ? 'extension-firefox/dist' : isSafari ? 'extension-safa
 
 export default defineConfig(() => ({
   entry: {
-    'contentScripts/listenVideoControl': './src/contentScripts/listenVideoControl.ts',
-    'contentScripts/hlsPlayer': './src/contentScripts/hlsPlayer.ts',
     'contentScripts/flvPlayer': './src/contentScripts/flvPlayer.ts',
     'background/index': './src/background/index.ts',
     'contentScripts/pageLoading': './src/contentScripts/pageLoading.ts',
