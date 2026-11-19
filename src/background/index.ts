@@ -7,6 +7,7 @@ import { onMessage } from '~/utils/messaging'
 
 import { isAppClientRequestUrl, setupAppClient } from './appClient'
 import { setupContentScriptRefreshPrompt } from './contentScriptRefreshPrompt'
+import { setupHostPermissionsDiagnostics } from './hostPermissions'
 import { setupLoginStateWatcher } from './loginStateWatcher'
 import { setupApiMsgListeners } from './messageListeners/api'
 import { setupTabMsgListeners } from './messageListeners/tabs'
@@ -215,6 +216,7 @@ setupTabMsgListeners()
 setupTopBarStateBroker()
 setupWatchLaterStateBroker()
 setupContentScriptRefreshPrompt()
+setupHostPermissionsDiagnostics()
 setupLoginStateWatcher()
 onMessage(GET_BROWSER_INFO_MESSAGE, getExtensionBrowserInfo)
 
