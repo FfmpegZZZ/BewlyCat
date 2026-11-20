@@ -92,7 +92,7 @@ function updateDockItemPageMode(dockItem: DockItem, useOriginalBiliPage: boolean
 <template>
   <div>
     <SettingsItemGroup :title="$t('settings.group_dock')">
-      <SettingsItem :title="$t('settings.dock_position')" :desc="$t('settings.dock_position_desc')" right-width="auto">
+      <SettingsItem :title="$t('settings.dock_position')" right-width="auto">
         <Select
           v-model="settings.dockPosition"
           :options="dockPositions"
@@ -201,7 +201,7 @@ function updateDockItemPageMode(dockItem: DockItem, useOriginalBiliPage: boolean
       <SettingsItem :title="$t('settings.back_to_top_and_refresh_buttons_are_separated')" right-width="auto">
         <Radio v-model="settings.backToTopAndRefreshButtonsAreSeparated" />
       </SettingsItem>
-      <SettingsItem :title="$t('settings.enable_undo_refresh_button')" :desc="$t('settings.enable_undo_refresh_button_desc')" right-width="auto">
+      <SettingsItem v-if="!settings.useOriginalBilibiliHomepage" :title="$t('settings.enable_undo_refresh_button')" :desc="$t('settings.enable_undo_refresh_button_desc')" right-width="auto">
         <Radio v-model="settings.enableUndoRefreshButton" />
       </SettingsItem>
     </SettingsItemGroup>

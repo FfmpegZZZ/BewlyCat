@@ -309,8 +309,10 @@ export interface Settings {
   ambilightFps: number
   /** 画面与声音调整面板的画面项（旋转、镜像） */
   playerPictureAdjustmentEnabled: boolean
-  /** 画面与声音调整面板的音画同步项；音量均衡项跟随 localLoudnessEnabled，三项均关闭时不显示按钮 */
+  /** 画面与声音调整面板的音画同步项 */
   playerAudioDelayEnabled: boolean
+  /** 画面与声音调整面板的音量均衡项（三项均不显示时隐藏控制栏按钮）；关闭不影响后台局部音量均衡生效 */
+  showLocalLoudnessControl: boolean
   localLoudnessEnabled: boolean
   localLoudnessTarget: number
   localLoudnessStrength: number
@@ -489,6 +491,7 @@ export interface Settings {
   backToTopAndRefreshButtonsAreSeparated: boolean
   alwaysShowDockActionsWhenAutoHide: boolean
   enableUndoRefreshButton: boolean // 添加撤销刷新按钮配置项
+  enableNativeHomeFeedHistory: boolean // 原版首页推荐前进后退按钮
 
   sidebarPosition: 'left' | 'right'
   autoHideSidebar: boolean
@@ -628,6 +631,7 @@ export interface Settings {
   enableVideoPlayerModeOverrides: boolean // 启用按场景覆盖播放器显示模式
   videoPlayerModeOverrides: VideoPlayerModeOverrides // 不同播放场景的显示模式覆盖
   autoExitFullscreenOnEnd: boolean // 全屏播放完毕后自动退出
+  showVerticalVideoZoomButton: boolean // 显示竖屏视频放大按钮
   showBewlyWidescreenButton: boolean // 显示播放器 Bewly 宽屏按钮
   showVideoScreenshotButton: boolean // 显示播放器截图按钮
   showVideoPipButton: boolean // 显示播放器画中画按钮
@@ -698,6 +702,7 @@ export const originalSettings: Settings = {
   ambilightFps: 24,
   playerPictureAdjustmentEnabled: true,
   playerAudioDelayEnabled: true,
+  showLocalLoudnessControl: true,
   localLoudnessEnabled: false,
   localLoudnessTarget: -18,
   localLoudnessStrength: 75,
@@ -865,6 +870,7 @@ export const originalSettings: Settings = {
   backToTopAndRefreshButtonsAreSeparated: true,
   alwaysShowDockActionsWhenAutoHide: false,
   enableUndoRefreshButton: true, // 默认开启撤销刷新按钮
+  enableNativeHomeFeedHistory: true, // 默认开启原版首页推荐前进后退按钮
 
   sidebarPosition: 'right',
   autoHideSidebar: false,
@@ -1001,6 +1007,7 @@ export const originalSettings: Settings = {
     momentsDialog: 'inherit',
   },
   autoExitFullscreenOnEnd: false, // 全屏播放完毕后自动退出，默认关闭
+  showVerticalVideoZoomButton: true, // 默认显示竖屏视频放大按钮
   showBewlyWidescreenButton: true, // 默认显示播放器 Bewly 宽屏按钮
   showVideoScreenshotButton: true, // 默认显示播放器截图按钮
   showVideoPipButton: true, // 默认显示播放器画中画按钮
@@ -1198,6 +1205,13 @@ export const settings = useSettingsStorage(originalSettings, {
       Reflect.deleteProperty(record, 'enableFavoriteCoverBlur')
     }
 
+    // 原版首页推荐前进后退从 Dock 的 enableUndoRefreshButton 拆出为独立开关，旧用户继承原偏好。
+    if (typeof record.enableNativeHomeFeedHistory !== 'boolean') {
+      record.enableNativeHomeFeedHistory = typeof record.enableUndoRefreshButton === 'boolean'
+        ? record.enableUndoRefreshButton
+        : originalSettings.enableNativeHomeFeedHistory
+    }
+
     // 原版首页用户此前看不到 Dock，引入独立开关后保持原有界面。
     if (!record.pluginModulesMigrated) {
       if (record.useOriginalBilibiliHomepage === true)
@@ -1264,15 +1278,16 @@ export const settings = useSettingsStorage(originalSettings, {
 
     // 音量均衡按钮已扩展为画面与声音调整按钮，旧显示开关不再沿用。
     Reflect.deleteProperty(record, 'showLocalLoudnessButton')
-    // 整体显示开关拆分为画面与音画同步两项；旧版关闭了按钮的用户两项一并关闭。
+    // 整体显示开关拆分为画面、音画同步与音量均衡控制项；旧版关闭了按钮的用户三项一并关闭。
     if (typeof record.showPlayerAdjustmentButton === 'boolean') {
       if (!record.showPlayerAdjustmentButton) {
         record.playerPictureAdjustmentEnabled = false
         record.playerAudioDelayEnabled = false
+        record.showLocalLoudnessControl = false
       }
       Reflect.deleteProperty(record, 'showPlayerAdjustmentButton')
     }
-    for (const key of ['playerPictureAdjustmentEnabled', 'playerAudioDelayEnabled'] as const) {
+    for (const key of ['playerPictureAdjustmentEnabled', 'playerAudioDelayEnabled', 'showLocalLoudnessControl'] as const) {
       if (typeof record[key] !== 'boolean')
         record[key] = true
     }
@@ -1435,9 +1450,6 @@ export const settings = useSettingsStorage(originalSettings, {
     }
     if (record.shortcuts)
       Reflect.deleteProperty(record.shortcuts, 'listenVideo')
-
-    // 竖屏放大功能已移除，清理旧版本保存的显示开关。
-    Reflect.deleteProperty(record, 'showVerticalVideoZoomButton')
 
     // 「想看」分组已移除，清理旧版本保存的开关。
     Reflect.deleteProperty(record, 'momentsEnableWantedFilter')
