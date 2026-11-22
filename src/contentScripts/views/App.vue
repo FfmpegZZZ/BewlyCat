@@ -51,8 +51,9 @@ useAccountSync()
 const { isLayoutEditing, exitLayoutEditMode } = useLayoutEditMode()
 const { t } = useI18n()
 
-// The top-bar switcher is teleported to document.body, outside this Shadow DOM.
-// Raise the host while the settings overlay is open so the modal can stay above that layer.
+// Track overlay state on #bewly for shortcut isolation and to raise the fixed
+// homepage viewport host above the teleported native top bar; non-homepage
+// pages leave #bewly without a stacking context so video glass backgrounds stay behind native content.
 watch(settingsOverlayVisible, (visible) => {
   document.getElementById('bewly')?.classList.toggle('settings-open', visible)
 }, { immediate: true })
@@ -99,7 +100,7 @@ const searchFocusOverlayActive = ref(false)
 const pageWallpaperReady = ref(false)
 const useBlendedPageControls = computed(() => settings.value.enableFrostedGlass
   && settings.value.frostedGlassBlurIntensity > 0
-  && !settings.value.disableBackground
+  && settings.value.enableBackground
   && (pageWallpaperReady.value || (settings.value.useLinearGradientThemeColorBackground && isDark.value)))
 
 // Registered before the layout-edit Escape handler: an open dialog consumes Escape first.
@@ -1937,7 +1938,7 @@ if (settings.value.cleanUrlArgument) {
     @scroll.capture.passive="scheduleLayoutEditTargetsRefresh"
   >
     <!-- Background -->
-    <template v-if="showBewlyPage && !settings.disableBackground">
+    <template v-if="showBewlyPage && settings.enableBackground">
       <AppBackground :activated-page="activatedPage" @wallpaper-ready="pageWallpaperReady = $event" />
     </template>
     <div
